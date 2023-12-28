@@ -41,7 +41,6 @@ def main():
     a = 40
     #print(fib(a))
     b = [1,2,3,4,5]
-    c = b[0]
     return 0
 
 ```
