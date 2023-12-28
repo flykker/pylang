@@ -39,8 +39,8 @@ def fib(n):
 #2 Comments
 def main():
     a = 40
-    #print(fib(a))
-    b = [1,2,3,4,5]
+	b = [1,2,3,4,5]
+    print(fib(a))
     return 0
 
 ```
