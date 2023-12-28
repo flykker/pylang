@@ -1,5 +1,3 @@
-# LLVM4
-
 ## About
 
 * LLVM frontend (IR generation) Compiler Python language
