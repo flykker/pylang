@@ -4,6 +4,11 @@ import llvmlite.ir as ir
 import llvmlite.binding as llvm
 import argparse
 
+def print_tree(ctx, parser):
+    from antlr4.tree.Trees import Trees
+    
+    import pprint
+    pprint.pprint(Trees.toStringTree(ctx, None, parser))
 
 class MyVisitor(SoLangVisitor):
     def __init__(self, args: argparse.Namespace):
@@ -41,12 +46,14 @@ class MyVisitor(SoLangVisitor):
 
         # generate code
         llvm_ir = str(self.module)
+
+        print(llvm_ir)
         llvm_ir_parsed = llvm.parse_assembly(llvm_ir)
 
         # optimizer
         if self.optimize:
             pmb = llvm.create_pass_manager_builder()
-            pmb.opt_level = 1
+            pmb.opt_level = 3
             pm = llvm.create_module_pass_manager()
             pmb.populate(pm)
             pm.run(llvm_ir_parsed)
@@ -69,6 +76,8 @@ class MyVisitor(SoLangVisitor):
                 params.append(self.i64)
                 paramnames.append(paramdef)
 
+        
+
         # register function
         ftype = ir.FunctionType(self.i64, params)
         func = ir.Function(self.module, ftype, name=name)
@@ -87,6 +96,7 @@ class MyVisitor(SoLangVisitor):
         # define variables for the paramnames
         for paramname in paramnames:
             var = self.builder.alloca(self.i64, size=8, name=paramname)
+            print("var def-1: ", name, var)
             self.variables[self.current_function][paramname] = var
 
         # create _ret variable
@@ -101,7 +111,13 @@ class MyVisitor(SoLangVisitor):
             self.builder.store(value, ptr)
             i += 1
 
+        # print(params, paramnames)
+        # print(self.variables)
+
         ret = self.visitChildren(ctx)
+
+        # print(params, paramnames)
+        # print(self.variables)
 
         # make a block for ret
         func.basic_blocks.append(retbb)
@@ -118,12 +134,14 @@ class MyVisitor(SoLangVisitor):
         name = ctx.Ident().getText()
         # create variable
         var = self.builder.alloca(self.i64, size=8, name=name)
+        print("var def: ", var)
         self.variables[self.current_function][name] = var
         return None
 
     def visitAsgnStmt(self, ctx: SoLangParser.AsgnStmtContext):
         name = ctx.Ident().getText()
         value = self.visit(ctx.expr())
+        print("assign_value: ", value)
         ptr = self.variables[self.current_function][name]
         self.builder.store(value, ptr)
         return None
@@ -131,11 +149,13 @@ class MyVisitor(SoLangVisitor):
     def visitWriteStmt(self, ctx: SoLangParser.WriteStmtContext):
         # call write()
         args = (self.visit(ctx.expr()),)
+        print("args write: ", args)
         ret = self.builder.call(self.fn_write, (args), name='write')
         return ret
 
     def visitReturnStmt(self, ctx: SoLangParser.ReturnStmtContext):
         value = self.visit(ctx.expr())
+        print("Value: ", value)
         ptr = self.variables[self.current_function]['_ret']
         self.builder.store(value, ptr)
         self.builder.branch(self.functions[self.current_function]['retbb'])
@@ -173,6 +193,9 @@ class MyVisitor(SoLangVisitor):
                         ctx.expr(0)), self.visit(
                         ctx.expr(1)), 'ne')
             elif ctx.children[1].getText() == '<=':
+                print("COND1: ", self.visit(ctx.expr(0)))
+                print("COND2: ", self.visit(ctx.expr(1)))
+
                 return self.builder.icmp_signed(
                     '<=', self.visit(
                         ctx.expr(0)), self.visit(
@@ -196,14 +219,13 @@ class MyVisitor(SoLangVisitor):
     def visitUnaryExpr(self, ctx: SoLangParser.UnaryExprContext):
         ret = self.visit(ctx.children[1])
         if ctx.children[0].getText() == '-':
-            ret = self.builder.mul(
-                ret, ir.Constant(
-                    self.i64, -1), name='mul_tmp')
+            ret = self.builder.mul(ret, ir.Constant(self.i64, -1), name='mul_tmp')
         return ret
 
     def visitMulDivExpr(self, ctx: SoLangParser.MulDivExprContext):
         lhs = self.visit(ctx.expr(0))
         rhs = self.visit(ctx.expr(1))
+        
         if ctx.children[1].getText() == '*':
             ret = self.builder.mul(lhs, rhs, name='mul_tmp')
         else:
@@ -211,8 +233,12 @@ class MyVisitor(SoLangVisitor):
         return ret
 
     def visitAddSubExpr(self, ctx: SoLangParser.AddSubExprContext):
+        # print("TREE: ");print_tree(ctx, ctx.parser)
+        # print("ADD: ", ctx.expr())
         lhs = self.visit(ctx.expr(0))
         rhs = self.visit(ctx.expr(1))
+        # print("LHS: ", lhs)
+        # print("RHS: ", rhs)
         if ctx.children[1].getText() == '+':
             ret = self.builder.add(lhs, rhs, name='add_tmp')
         else:
@@ -229,15 +255,22 @@ class MyVisitor(SoLangVisitor):
         # call function
         fn_name = ctx.Ident().getText()
         args = self.visit(ctx.params())
+        print("CALL ARGS: ", args)
         ret = self.builder.call(
             self.functions[fn_name]['func'], args, name=fn_name)
         return ret
 
     def visitIdentExpr(self, ctx: SoLangParser.IdentExprContext):
         name = ctx.Ident().getText()
+        print("ident expr: ", name)
+        print("VAR: ", self.variables)
+        
         if name in self.variables[self.current_function]:
             ptr = self.variables[self.current_function][name]
-            return self.builder.load(ptr, name)
+            
+            ret = self.builder.load(ptr, name)
+            #print("ident expr load: ", ret)
+            return ret
         else:
             return None
 
@@ -260,6 +293,7 @@ class MyVisitor(SoLangVisitor):
                 ret += self.visit(child)
             elif isinstance(child, SoLangParser.ParamContext):
                 ret.append(self.visit(child))
+        print("params_ret: ", ret)
         return ret
 
     def visitParam(self, ctx: SoLangParser.ParamContext):

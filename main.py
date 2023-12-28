@@ -14,26 +14,39 @@ def parse_args() -> argparse.Namespace:
 
 
 def tokenize(source: str) -> antlr4.CommonTokenStream:
-    lexer = grammar.SoLangLexer(antlr4.InputStream(source))
+    lexer = grammar.PythonLexer(antlr4.InputStream(source))
     return antlr4.CommonTokenStream(lexer)
 
 
 def visit(
         args: argparse.Namespace,
         token_stream: antlr4.CommonTokenStream) -> None:
-    parser = grammar.SoLangParser(token_stream)
-    visitor = grammar.MyVisitor(args)
+    parser = grammar.PythonParser(token_stream)
+    
+    visitor = grammar.PyLangVisitor(args, parser=parser)
 
     # visit AST nodes
-    visitor.visitCompilationUnit(parser.compilationUnit())
+    visitor.visitFile_input(parser.file_input())
 
 
 def main():
     args = parse_args()
-    source = ''.join(sys.stdin.readlines())
-    token_stream = tokenize(source)
-    visit(args, token_stream)
 
+    try:
+        file = open("tests/fib.py","r")
+        source =  file.read(1024)
+    except:
+        source = ''.join(sys.stdin.readlines())
+    token_stream = tokenize(source)
+
+    # from antlr4.tree.Trees import Trees
+    # parser = grammar.PythonParser(token_stream)
+    
+    # tree = parser.file_input()
+    # import pprint
+    # pprint.pprint(Trees.toStringTree(tree, None, parser))
+
+    visit(args, token_stream)
 
 if __name__ == '__main__':
     main()

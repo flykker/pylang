@@ -1,4 +1,5 @@
-ANTLR4=java -jar /usr/local/lib/antlr-4.10.1-complete.jar
+ANTLR4=java -jar antlr-4.13.1-complete.jar
+
 
 GRAMMAR_PY=build/grammar/SoLangLexer.py \
 build/grammar/SoLang.interp \
@@ -7,7 +8,16 @@ build/grammar/SoLangLexer.interp \
 build/grammar/SoLangLexer.tokens \
 build/grammar/SoLangParser.py
 
+ANTLR4_PY=build/grammar/PyLangLexer.py \
+build/grammar/PyLang.interp \
+build/grammar/PyLang.tokens \
+build/grammar/PyLangLexer.interp \
+build/grammar/PyLangLexer.tokens \
+build/grammar/PyLangParser.py
+
 all: $(GRAMMAR_PY) build/builtin.ll
+
+pylang: genrules build/builtin.ll
 
 run: all
 	./main.py
@@ -19,45 +29,50 @@ clean:
 tmp: all
 	echo "* running tmp test"
 	echo "int main(){int x;x=1;write(0);if (x==2) {write(10);} else {write(20);} write(1); write (2);return 0;}" | ./main.py
-	llvm-link build/out.ll build/builtin.ll -S -o build/linked.ll
+	llvm-link-12 build/out.ll build/builtin.ll -S -o build/linked.ll
 	echo "* running linked.ll by lli (inetrpreter)"
 	lli build/linked.ll
 
-test: all
+run-pytest:
+	echo "Running test pylang"
+	cat tests/fib.py | ./main.py -O
+	llvm-link-12 build/out.ll build/builtin.ll -S -o build/linked.ll
+	lli build/linked.ll
+
+pytest:
+	echo "Running test pylang"
+	cat tests/fib.py | ./main.py -O
+	llvm-link-12 build/out.ll build/builtin.ll -S -o build/linked.ll
+#	lli build/linked.ll
+	llc-12 build/linked.ll -o build/linked.s
+	clang-12 build/linked.s -o build/linked
+	echo "Run binary python ..."
+	./build/linked
+
+test: 
 	echo "* running test 1"
-	echo "int main(){write(-3+1*2);return 0;}" | ./main.py
-	llvm-link build/out.ll build/builtin.ll -S -o build/linked.ll
-	echo "* running linked.ll by lli (inetrpreter)"
-	lli build/linked.ll
-	echo echo "* running test 2"
-	echo "int main(){write(1+2*(3+4));return 0;}" | ./main.py
-	llvm-link build/out.ll build/builtin.ll -S -o build/linked.ll
-	llc build/linked.ll -o build/linked.s
-	clang build/linked.s -o build/linked
-	echo "* running native linked"
-	build/linked
-	echo
-	echo "* running test 3"
 	cat tests/if.solang | ./main.py
-	llvm-link build/out.ll build/builtin.ll -S -o build/linked.ll
+	llvm-link-12 build/out.ll build/builtin.ll -S -o build/linked.ll
 	lli build/linked.ll
 	echo
-	echo "* running test 4"
-	cat tests/fib.solang | ./main.py
-	llvm-link build/out.ll build/builtin.ll -S -o build/linked.ll
-	lli build/linked.ll
-	echo "* running test 5"
-	echo "int main(){int x;x=1;if(x==1){write(1);}else{write(2);}; if(x>3){write(10);} if(x>=10){write(100);}else{write(200);}return 0;}" | ./main.py
-	llvm-link build/out.ll build/builtin.ll -S -o build/linked.ll
-	echo "* running linked.ll by lli (inetrpreter)"
-	lli build/linked.ll
+	echo "* running test 2"
+	cat tests/fib.solang | ./main_.py -O
+	llvm-link-12 build/out.ll build/builtin.ll -S -o build/linked.ll
+	llc-12 build/linked.ll -o build/linked.s
+	clang-12 build/linked.s -o build/linked
+	echo "Run binary python ..."
+	./build/linked
 
 # generation rules
 $(GRAMMAR_PY): grammar/SoLang.g4
 	[ -d build ] || mkdir build
 	$(ANTLR4) grammar/SoLang.g4 -no-listener -visitor -o build
 
+genrules: grammar/PyLang.g4
+	[ -d build ] || mkdir build
+	$(ANTLR4) grammar/PyLang.g4 -no-listener -visitor -o build
+
 build/builtin.ll: builtin.c
 	[ -d build ] || mkdir build
-	clang -emit-llvm -S -O -o build/builtin.ll builtin.c
+	clang-12 -emit-llvm -S -O -o build/builtin.ll builtin.c
 
