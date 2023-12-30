@@ -24,7 +24,7 @@ make run-pytest
 ```python
 # Comments
 def print(number):
-	# C function printf
+    # C function printf
     write(number)
     return 0
 
@@ -39,7 +39,7 @@ def fib(n):
 #2 Comments
 def main():
     a = 40
-	b = [1,2,3,4,5]
+    b = [1,2,3,4,5]
     print(fib(a))
     return 0
 
