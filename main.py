@@ -10,6 +10,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('-O', dest='optimize', action='store_true',
                         default=False,
                         help='Optimize genrated IR')
+    parser.add_argument('-C', dest='compile', action='store_true',
+                        default=False,
+                        help='Compile IR')
     return parser.parse_args()
 
 

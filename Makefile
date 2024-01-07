@@ -7,33 +7,33 @@ build/grammar/PyLangLexer.interp \
 build/grammar/PyLangLexer.tokens \
 build/grammar/PyLangParser.py
 
-pylang: genrules build/builtin.ll
+pylang: genrules lib
 
 clean:
 	[ -d build ] && rm -rf build/*
 	[ -d __pycache__ ] && rm -rf __pycache__
 
-run-pytest:
+run-jit:
 	echo "Running test pylang"
-	cat tests/fib.py | ./main.py -O
-	llvm-link-12 build/out.ll build/builtin.ll -S -o build/linked.ll
-	lli build/linked.ll
+	python3.10 ./main.py -O
+#	llvm-link build/out.ll build/builtin.ll -S -o build/linked.ll
+	lli --jit-kind=mcjit build/linked.ll
 
-pytest:
+run:
 	echo "Running test pylang"
-	cat tests/fib.py | ./main.py -O
-	llvm-link-12 build/out.ll build/builtin.ll -S -o build/linked.ll
-#	lli build/linked.ll
-	llc-12 build/linked.ll -o build/linked.s
-	clang-12 build/linked.s -o build/linked
+	python3.10 ./main.py -O -C
+#	llvm-link build/out.ll build/builtin.ll -S -o build/linked.ll
+#	llc build/linked.ll -o build/linked.s
+	llvm-as build/linked.ll -o build/linked.bc
+	clang build/linked.bc -o build/app
 	echo "Run binary python ..."
-	./build/linked
+	./build/app
 
 genrules: grammar/PyLang.g4
 	[ -d build ] || mkdir build
 	$(ANTLR4) grammar/PyLang.g4 -no-listener -visitor -o build
 
-build/builtin.ll: builtin.c
+lib: builtin.c
 	[ -d build ] || mkdir build
-	clang-12 -emit-llvm -S -O -o build/builtin.ll builtin.c
+	clang -emit-llvm -S -O -o build/builtin.ll builtin.c
 
