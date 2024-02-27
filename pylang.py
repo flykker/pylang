@@ -36,8 +36,8 @@ def main():
     args = parse_args()
 
     try:
-        file = open("tests/fib.py","r")
-        source =  file.read(1024)
+        file = open("tests/main.py","r")
+        source =  file.read()
     except:
         source = ''.join(sys.stdin.readlines())
     token_stream = tokenize(source)

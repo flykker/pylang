@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
-
+#include <string.h>
+#include <sys/socket.h>
 
 // Function to swap two numbers
 
@@ -15,7 +16,6 @@ char* reverse(char *buffer, int i, int j)
 	while (i < j) {
 		swap(&buffer[i++], &buffer[j--]);
 	}
-
 	return buffer;
 }
 
@@ -64,14 +64,18 @@ char* itostr(int value, char* buffer, int base)
 	return reverse(buffer, 0, i - 1);
 }
 
-// char* itostr(int value, char* buffer, int base)
-// {
-// 	itoa(value, buffer, base);
-// 	return buffer;
-// }
-// void print(char* str){
-// 	printf ("%s", str);
-// }
+int64_t i64(int32_t num){
+	return (int64_t)num;
+}
+
+int16_t i16(int32_t num){
+	return (int16_t)num;
+}
+
+char* bytearray(int32_t count){
+	char* bytes = (char*)malloc(count * sizeof(char));
+	return bytes;
+}
 
 // // Implement itoa function in C
 // int main(void)
