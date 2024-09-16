@@ -2,12 +2,19 @@
 
 * LLVM frontend (IR generation) Compiler Python language
 
-## How to build to exec
+## Prepare install for build and jit
 
-* Run run-buil app to build/linked
+```
+pip3 install -r requirements.txt
+sudo apt install llvm-15 clang-15
+```
+
+## How to build and run to exec
+
+* Run run app to build/linked build and run
 
 ```sh
-make run-build
+make run
 ```
 
 ## How to run JIT
