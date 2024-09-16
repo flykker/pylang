@@ -4,18 +4,18 @@
 
 ## How to build to exec
 
-* Run `make pytest` to build/linked
+* Run run-buil app to build/linked
 
 ```sh
-make pytest
+make run-build
 ```
 
 ## How to run JIT
 
-* Run `make run-pytest` to see what happens
+* Run `make run-jit` to see what happens
 
 ```sh
-make run-pytest
+make run-jit
 
 ```
 
