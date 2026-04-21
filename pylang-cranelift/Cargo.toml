@@ -1,0 +1,15 @@
+[package]
+name = "pylang-cranelift"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pylang-ir = { path = "../pylang-ir" }
+pylang-front = { path = "../pylang-front" }
+pylang-runtime = { path = "../pylang-runtime" }
+cranelift = "0.131"
+cranelift-codegen = "0.131"
+cranelift-native = "0.131"
+cranelift-module = "0.131"
+cranelift-object = "0.131"
+anyhow = "1"

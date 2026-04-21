@@ -1,0 +1,7 @@
+[package]
+name = "pylang-front"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pylang-ir = { path = "../pylang-ir" }

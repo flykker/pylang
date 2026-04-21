@@ -1,0 +1,3 @@
+def main() -> int:
+    let x: int = 42
+    return x

@@ -196,12 +196,13 @@ pylang/
 
 ## Порядок реализации
 
-### Phase 1 — Foundation (месяц 1–2)
+### Phase 1 — Foundation (месяц 1–2) ✅
 
-- PEG parser (baseline Python subset: функции, int, str, if, while, return)
-- Hindley-Milner type checker
-- Minimal Pylang IR (Func, Call, Branch, Return, Alloc, Load, Store)
-- Lowering to Cranelift → native binary
+- ✅ PEG parser (baseline Python subset: функции, int, str, if, while, return)
+- ✅ Hindley-Milner type checker
+- ✅ Minimal Pylang IR (Func, Call, Branch, Return, Alloc, Load, Store)
+- ✅ Lowering to Cranelift → native binary
+- ✅ Code review: removed memory leaks, fixed scope management
 
 ### Phase 2 — Full Python (месяц 2–4)
 

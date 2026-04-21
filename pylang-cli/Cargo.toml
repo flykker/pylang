@@ -1,0 +1,17 @@
+[package]
+name = "pylang-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "pylang"
+path = "src/main.rs"
+
+[dependencies]
+pylang-front = { path = "../pylang-front" }
+pylang-ir = { path = "../pylang-ir" }
+pylang-cranelift = { path = "../pylang-cranelift" }
+pylang-runtime = { path = "../pylang-runtime" }
+
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
