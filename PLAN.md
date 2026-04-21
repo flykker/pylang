@@ -204,12 +204,62 @@ pylang/
 - ✅ Lowering to Cranelift → native binary
 - ✅ Code review: removed memory leaks, fixed scope management
 
-### Phase 2 — Full Python (месяц 2–4)
+### Phase 2 — Full Python (месяц 2–4) ⚠️ (in progress — fixing gaps)
 
-- Classes, traits, generics, monomorphization
-- Exceptions (try/except/finally + state machine)
-- Closures / lambda
+- ✅ Classes, traits, generics, monomorphization
+- ✅ Exceptions (try/except/finally + state machine)
+- ✅ Parser stubs: if, while, for, loop, match, with, yield, assert
+- ✅ Lambda expressions
+- ⚠️ Sema: complete type checking for all constructs (see Phase 2 Fix)
+- ⚠️ Lowering: complete IR generation for all constructs (see Phase 2 Fix)
 - Full stdlib primitives
+
+### Phase 2 Fix — Sema & Lowering Completion ⚠️ (critical — in progress)
+
+После code review выявлены критические пробелы:
+
+#### Sema (pylang-front/src/sema.rs)
+
+**Проблема 1: check_stmt** — пропускает без проверки:
+- `Stmt::Loop` — бесконечный цикл
+- `Stmt::Match` — pattern matching
+- `Stmt::With` — context manager
+- `Stmt::Yield` — генератор
+- `Stmt::Assert` — assertions
+- `Stmt::Break` / `Stmt::Continue`
+- `Stmt::Pass`
+
+**Проблема 2: check_expr** — возвращает `Type::I64` вместо правильных типов:
+- `Expr::Lambda` → должен быть `Type::Function`
+- `Expr::Dot` → должен быть тип поля
+- `Expr::Method` → должен быть тип возврата
+- `Expr::Index` → должен быть тип элемента
+- `Expr::Slice` → должен быть тип среза
+- `Expr::If` → должен быть общий тип then/else
+- `Expr::Match` → должен быть тип matched arm
+
+#### Lowering (pylang-cranelift/src/lower.rs)
+
+**Проблема 1: lower_stmt** — не генерирует IR для:
+- Class, Struct — определения типов
+- If, While, For, Loop — control flow
+- Match — pattern matching
+- Try, Raise — исключения
+- With — context manager
+- Assert — assertions
+
+**Проблема 2: lower_expr** — возвращает `Unit` для:
+- Call, Method — вызовы функций
+- BinOp (And, Or, Xor, Shl, Shr) — fallthrough → `IrBinOp::Add` (ОПАСНО!)
+
+#### Задачи исправления
+
+1. **Sema: check_stmt** — добавить case для каждого пропущенного Stmt
+2. **Sema: check_expr** — исправить типы для Lambda, Dot, Method, Index, Slice, If, Match
+3. **Lowering: lower_stmt** — реализовать генерацию IR для всех statement'ов
+4. **Lowering: lower_expr** — исправить fallthrough (ошибка, не `Add`)
+5. **Lowering: lower_binop** — добавить все битовые операции
+6. **Тесты** — добавить тесты семантики и lowering
 
 ### Phase 3 — Performance (месяц 4–6)
 
