@@ -5,6 +5,7 @@ use pylang_front::parser::Parser as PylangParser;
 use pylang_front::sema::Sema;
 use pylang_cranelift::Compiler;
 use std::process;
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -20,6 +21,18 @@ struct Args {
 
     #[arg(short, long)]
     target: Option<String>,
+
+    #[arg(long)]
+    no_stdlib: bool,
+}
+
+fn get_stdlib_path() -> Option<PathBuf> {
+    std::env::current_exe().ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .map(|mut p| {
+            p.push("pylang-std");
+            p
+        })
 }
 
 fn main() -> Result<()> {

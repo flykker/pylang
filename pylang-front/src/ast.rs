@@ -318,6 +318,7 @@ pub enum Type {
     Usize,
     Char,
     Named(String),
+    Class(String),
     Tuple(Vec<Type>),
     Fn {
         params: Vec<Type>,

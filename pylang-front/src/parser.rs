@@ -2,7 +2,7 @@
 //!
 //! Recursive descent. Парсит type-annotated Python subset.
 
-use crate::ast::*;
+use crate::ast::{Class, *};
 use crate::lexer::{Lexer, Pos, Span, Spanned, TokenKind};
 use crate::sema::Sema;
 
@@ -27,6 +27,7 @@ pub enum ParseError {
     MissingBody { span: Span },
     InvalidAssignmentTarget { span: Span },
     InvalidPattern { span: Span },
+    ExpectedIdent { found: TokenKind, span: Span },
 }
 
 impl<'src> Parser<'src> {
@@ -133,6 +134,7 @@ impl<'src> Parser<'src> {
                 Ok(Stmt::Pass)
             }
             TokenKind::Assert => self.parse_assert(),
+            TokenKind::Except | TokenKind::Finally | TokenKind::Eof => Err(ParseError::InvalidSyntax { span: token.span.clone() }),
             _ => {
                 let expr = self.parse_expr()?;
                 Ok(Stmt::Expr(expr))
@@ -264,7 +266,7 @@ impl<'src> Parser<'src> {
                 TokenKind::Eof => break,
                 TokenKind::Def | TokenKind::Class | TokenKind::Struct | TokenKind::If 
                 | TokenKind::While | TokenKind::For | TokenKind::Loop | TokenKind::Match 
-                | TokenKind::Try | TokenKind::With => break,
+                | TokenKind::Try | TokenKind::With | TokenKind::Except | TokenKind::Finally => break,
                 TokenKind::Newline => {
                     self.bump();
                     continue;
@@ -289,7 +291,7 @@ impl<'src> Parser<'src> {
     }
 
     fn skip_newline(&mut self) -> Result<(), ParseError> {
-        if self.at(&TokenKind::Newline) {
+        while self.at(&TokenKind::Newline) {
             self.bump();
         }
         Ok(())
@@ -602,14 +604,60 @@ impl<'src> Parser<'src> {
                 self.bump();
                 Ok(Expr::None)
             }
+            TokenKind::Lambda => self.parse_lambda(),
             _ => Err(ParseError::UnexpectedToken {
                 expected: "expression",
                 found: token.value.clone(),
                 span: token.span,
             }),
         }
+}
+    
+    fn parse_lambda(&mut self) -> Result<Expr, ParseError> {
+        self.bump();
+        
+        let mut params = Vec::new();
+        
+        if !self.at(&TokenKind::Colon) {
+            loop {
+                let name_tok = self.expect(TokenKind::Ident(String::new()))?;
+                let name = match &name_tok.value {
+                    TokenKind::Ident(s) => s.clone(),
+                    _ => return Err(ParseError::UnexpectedToken {
+                        expected: "parameter name",
+                        found: name_tok.value.clone(),
+                        span: name_tok.span,
+                    }),
+                };
+                
+                let ty = if self.at(&TokenKind::Colon) {
+                    self.bump();
+                    Some(self.parse_type()?)
+                } else {
+                    None
+                };
+                
+                params.push(Param {
+                    name,
+                    ty: ty.unwrap_or(Type::I64),
+                    default: None,
+                });
+                
+                if self.at(&TokenKind::Comma) {
+                    self.bump();
+                    continue;
+                }
+                break;
+            }
+        }
+        
+        self.expect(TokenKind::Colon)?;
+        
+        let body = Box::new(self.parse_expr()?);
+        
+        Ok(Expr::Lambda { params, body })
     }
-
+    
     // Stub implementations for remaining statement types
     fn parse_class(&mut self) -> Result<Stmt, ParseError> {
         self.bump();
@@ -640,17 +688,323 @@ impl<'src> Parser<'src> {
         Ok(Stmt::Class(Class { name, bases, body }))
     }
     
-    fn parse_struct(&mut self) -> Result<Stmt, ParseError> { Ok(Stmt::Pass) }
-    fn parse_if(&mut self) -> Result<Stmt, ParseError> { Ok(Stmt::Pass) }
-    fn parse_while(&mut self) -> Result<Stmt, ParseError> { Ok(Stmt::Pass) }
-    fn parse_for(&mut self) -> Result<Stmt, ParseError> { Ok(Stmt::Pass) }
-    fn parse_loop(&mut self) -> Result<Stmt, ParseError> { Ok(Stmt::Pass) }
-    fn parse_match(&mut self) -> Result<Stmt, ParseError> { Ok(Stmt::Pass) }
-    fn parse_try(&mut self) -> Result<Stmt, ParseError> { Ok(Stmt::Pass) }
-    fn parse_with(&mut self) -> Result<Stmt, ParseError> { Ok(Stmt::Pass) }
-    fn parse_yield(&mut self) -> Result<Stmt, ParseError> { Ok(Stmt::Pass) }
-    fn parse_raise(&mut self) -> Result<Stmt, ParseError> { Ok(Stmt::Pass) }
-    fn parse_assert(&mut self) -> Result<Stmt, ParseError> { Ok(Stmt::Pass) }
+    fn parse_struct(&mut self) -> Result<Stmt, ParseError> {
+        self.bump();
+        
+        let name_tok = self.expect(TokenKind::Ident(String::new()))?;
+        let name = match &name_tok.value {
+            TokenKind::Ident(s) => s.clone(),
+            _ => return Err(ParseError::UnexpectedToken { expected: "struct name", found: name_tok.value.clone(), span: name_tok.span }),
+        };
+        
+        self.expect(TokenKind::Colon)?;
+        self.skip_newline()?;
+        
+        let mut fields = Vec::new();
+        while self.at(&TokenKind::Ident(String::new())) {
+            let field_name_tok = self.expect(TokenKind::Ident(String::new()))?;
+            let field_name = match &field_name_tok.value {
+                TokenKind::Ident(s) => s.clone(),
+                _ => return Err(ParseError::UnexpectedToken { expected: "field name", found: field_name_tok.value.clone(), span: field_name_tok.span }),
+            };
+            self.expect(TokenKind::Colon)?;
+            let field_ty = self.parse_type()?;
+            fields.push((field_name, field_ty));
+            self.skip_newline()?;
+        }
+        
+        Ok(Stmt::Struct(Struct { name, fields }))
+    }
+    fn parse_if(&mut self) -> Result<Stmt, ParseError> {
+        self.bump();
+        
+        let cond = self.parse_expr()?;
+        self.expect(TokenKind::Colon)?;
+        self.skip_newline()?;
+        
+        let then = self.parse_suite()?;
+        
+        let mut elif = Vec::new();
+        while self.at(&TokenKind::Elif) {
+            self.bump();
+            
+            let elif_cond = self.parse_expr()?;
+            self.expect(TokenKind::Colon)?;
+            self.skip_newline()?;
+            
+            let elif_body = self.parse_suite()?;
+            
+            elif.push(Elif {
+                cond: elif_cond,
+                body: elif_body,
+            });
+        }
+        
+        let else_ = if self.at(&TokenKind::Else) {
+            self.bump();
+            self.expect(TokenKind::Colon)?;
+            self.skip_newline()?;
+            Some(self.parse_suite()?)
+        } else {
+            None
+        };
+        
+        Ok(Stmt::If(If { cond, then, elif, else_ }))
+    }
+    fn parse_while(&mut self) -> Result<Stmt, ParseError> {
+        self.bump();
+        
+        let cond = self.parse_expr()?;
+        self.expect(TokenKind::Colon)?;
+        self.skip_newline()?;
+        
+        let body = self.parse_suite()?;
+        
+        Ok(Stmt::While(While { cond, body }))
+    }
+    fn parse_for(&mut self) -> Result<Stmt, ParseError> {
+        self.bump();
+        
+        let target_tok = self.expect(TokenKind::Ident(String::new()))?;
+        let target = match &target_tok.value {
+            TokenKind::Ident(s) => s.clone(),
+            _ => return Err(ParseError::ExpectedIdent { found: target_tok.value.clone(), span: target_tok.span }),
+        };
+        
+        self.expect(TokenKind::In)?;
+        
+        let iter = self.parse_expr()?;
+        self.expect(TokenKind::Colon)?;
+        self.skip_newline()?;
+        
+        let body = self.parse_suite()?;
+        
+        Ok(Stmt::For(For { target, iter, body }))
+    }
+    fn parse_loop(&mut self) -> Result<Stmt, ParseError> {
+        self.bump();
+        
+        self.expect(TokenKind::Colon)?;
+        self.skip_newline()?;
+        
+        let body = self.parse_suite()?;
+        
+        Ok(Stmt::Loop(Loop { body }))
+    }
+    fn parse_match(&mut self) -> Result<Stmt, ParseError> {
+        self.bump();
+        
+        let expr = self.parse_expr()?;
+        self.expect(TokenKind::Colon)?;
+        self.skip_newline()?;
+        self.expect(TokenKind::Indent)?;
+        
+        let mut arms = Vec::new();
+        while !self.at(&TokenKind::Dedent) && !self.at(&TokenKind::Eof) {
+            let pat = self.parse_pattern()?;
+            
+            let guard = if self.at(&TokenKind::If) {
+                self.bump();
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
+            
+            self.expect(TokenKind::FatArrow)?;
+            self.skip_newline()?;
+            
+            let body = self.parse_suite()?;
+            
+            arms.push(MatchArm { pat, guard, body });
+        }
+        
+        self.expect(TokenKind::Dedent)?;
+        
+        Ok(Stmt::Match(Match { expr, arms }))
+    }
+    
+    fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
+        let span = self.current.as_ref().map(|t| t.span).unwrap_or_default();
+        
+        match &self.current {
+            Some(tok) => match &tok.value {
+                TokenKind::Underscore => {
+                    self.bump();
+                    Ok(Pattern::Wildcard)
+                }
+                TokenKind::LParen => {
+                    self.bump();
+                    let mut patterns = Vec::new();
+                    while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
+                        patterns.push(self.parse_pattern()?);
+                        if !self.at(&TokenKind::RParen) {
+                            self.expect(TokenKind::Comma)?;
+                        }
+                    }
+                    self.expect(TokenKind::RParen)?;
+                    Ok(Pattern::Tuple(patterns))
+                }
+                TokenKind::Int(n) => {
+                    let val = *n;
+                    self.bump();
+                    Ok(Pattern::Literal(Literal::Int(val)))
+                }
+                TokenKind::Float(f) => {
+                    let val = *f;
+                    self.bump();
+                    Ok(Pattern::Literal(Literal::Float(val)))
+                }
+                TokenKind::Str(s) => {
+                    let val = s.clone();
+                    self.bump();
+                    Ok(Pattern::Literal(Literal::Str(val)))
+                }
+                TokenKind::Ident(_) => {
+                    let name_tok = self.bump().unwrap();
+                    match &name_tok.value {
+                        TokenKind::Ident(s) => Ok(Pattern::Binding(s.clone())),
+                        _ => Err(ParseError::UnexpectedToken {
+                            expected: "identifier",
+                            found: name_tok.value.clone(),
+                            span,
+                        }),
+                    }
+                }
+                _ => Err(ParseError::UnexpectedToken {
+                    expected: "pattern",
+                    found: tok.value.clone(),
+                    span,
+                }),
+            },
+            None => Err(ParseError::UnexpectedToken {
+                expected: "pattern",
+                found: TokenKind::Eof,
+                span,
+            }),
+        }
+    }
+    fn parse_try(&mut self) -> Result<Stmt, ParseError> {
+        self.bump();
+        self.expect(TokenKind::Colon)?;
+        self.skip_newline()?;
+        
+        let body = self.parse_suite()?;
+        
+        let mut handlers = Vec::new();
+        while self.at(&TokenKind::Except) {
+            self.bump();
+            
+            let exc = if !self.at(&TokenKind::Colon) && !self.at(&TokenKind::As) {
+                Some(self.parse_type()?)
+            } else {
+                None
+            };
+            
+            let binding = if self.at(&TokenKind::As) {
+                self.bump();
+                let name_tok = self.expect(TokenKind::Ident(String::new()))?;
+                match &name_tok.value {
+                    TokenKind::Ident(s) => Some(s.clone()),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            
+            self.expect(TokenKind::Colon)?;
+            self.skip_newline()?;
+            
+            let handler_body = self.parse_suite()?;
+            
+            handlers.push(Handler {
+                exc,
+                binding,
+                body: handler_body,
+            });
+        }
+        
+        let finally = if self.at(&TokenKind::Finally) {
+            self.bump();
+            self.expect(TokenKind::Colon)?;
+            self.skip_newline()?;
+            Some(self.parse_suite()?)
+        } else {
+            None
+        };
+        
+        Ok(Stmt::Try(Try {
+            body,
+            handlers,
+            finally,
+        }))
+    }
+    fn parse_with(&mut self) -> Result<Stmt, ParseError> {
+        self.bump();
+        
+        let mut items = Vec::new();
+        
+        loop {
+            let expr = self.parse_expr()?;
+            
+            let as_ = if self.at(&TokenKind::As) {
+                self.bump();
+                let name_tok = self.expect(TokenKind::Ident(String::new()))?;
+                match &name_tok.value {
+                    TokenKind::Ident(s) => Some(s.clone()),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            
+            items.push(WithItem { expr, as_ });
+            
+            if self.at(&TokenKind::Comma) {
+                self.bump();
+                continue;
+            }
+            break;
+        }
+        
+        self.expect(TokenKind::Colon)?;
+        self.skip_newline()?;
+        
+        let body = self.parse_suite()?;
+        
+        Ok(Stmt::With(With { items, body }))
+    }
+    fn parse_yield(&mut self) -> Result<Stmt, ParseError> {
+        self.bump();
+        
+        let val = if self.at(&TokenKind::Newline) || self.at(&TokenKind::Colon) {
+            None
+        } else {
+            Some(self.parse_expr()?)
+        };
+        
+        Ok(Stmt::Yield(Yield { val }))
+    }
+    fn parse_raise(&mut self) -> Result<Stmt, ParseError> {
+        self.bump();
+        
+        let exc = self.parse_expr()?;
+        
+        Ok(Stmt::Raise(Raise { exc }))
+    }
+    fn parse_assert(&mut self) -> Result<Stmt, ParseError> {
+        self.bump();
+        
+        let cond = self.parse_expr()?;
+        
+        let msg = if self.at(&TokenKind::Comma) {
+            self.bump();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        
+        Ok(Stmt::Assert(Assert { cond, msg }))
+    }
 }
 
 #[cfg(test)]
@@ -679,6 +1033,17 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_lambda() {
+        let code = "lambda x: int, y: int: x + y";
+        let mut parser = Parser::new(code);
+        let mut sema = Sema::new();
+        let result = parser.parse(&mut sema);
+        assert!(result.is_ok());
+        let ast = result.unwrap();
+        assert_eq!(ast.len(), 1);
+    }
+
+    #[test]
     fn test_parse_let() {
         let code = "let x: int = 42";
         let mut parser = Parser::new(code);
@@ -695,10 +1060,50 @@ mod tests {
         let result = parser.parse(&mut sema);
         assert!(result.is_ok());
     }
+    
+    #[test]
+    fn test_parse_struct() {
+        let code = "struct Point:\n    x: int\n    y: int";
+        let mut parser = Parser::new(code);
+        let mut sema = Sema::new();
+        let result = parser.parse(&mut sema);
+        assert!(result.is_ok());
+        let ast = result.unwrap();
+        assert_eq!(ast.len(), 1);
+    }
 
     #[test]
     fn test_parse_if() {
         let code = "if true:\n    let x: int = 1";
+        let mut parser = Parser::new(code);
+        let mut sema = Sema::new();
+        let result = parser.parse(&mut sema);
+        assert!(result.is_ok());
+    }
+    
+    #[test]
+    fn test_parse_class() {
+        let code = "class Foo:\n    let x: int = 1";
+        let mut parser = Parser::new(code);
+        let mut sema = Sema::new();
+        let result = parser.parse(&mut sema);
+        assert!(result.is_ok());
+        let ast = result.unwrap();
+        assert_eq!(ast.len(), 1);
+    }
+    
+    #[test]
+    fn test_parse_try() {
+        let code = "try:\n    pass\nexcept:\n    pass";
+        let mut parser = Parser::new(code);
+        let mut sema = Sema::new();
+        let result = parser.parse(&mut sema);
+        assert!(result.is_ok());
+    }
+    
+    #[test]
+    fn test_parse_raise() {
+        let code = "raise Exception()";
         let mut parser = Parser::new(code);
         let mut sema = Sema::new();
         let result = parser.parse(&mut sema);

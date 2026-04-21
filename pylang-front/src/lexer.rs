@@ -54,6 +54,7 @@ pub enum TokenKind {
     Spawn,
     GetRef,
     Release,
+    Lambda,
 
     // Operators
     Plus,
@@ -312,6 +313,7 @@ impl<'src> Lexer<'src> {
             "return" => TokenKind::Return,
             "yield" => TokenKind::Yield,
             "raise" => TokenKind::Raise,
+            "lambda" => TokenKind::Lambda,
             "from" => TokenKind::From,
             "import" => TokenKind::Import,
             "try" => TokenKind::Try,
