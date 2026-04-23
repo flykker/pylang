@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, Default)]
 pub struct Name(pub String);
 
 impl Name {
@@ -17,12 +17,6 @@ impl Name {
 impl fmt::Debug for Name {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
-    }
-}
-
-impl Default for Name {
-    fn default() -> Self {
-        Name(String::new())
     }
 }
 

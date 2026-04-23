@@ -134,7 +134,7 @@ impl<'src> Parser<'src> {
                 Ok(Stmt::Pass)
             }
             TokenKind::Assert => self.parse_assert(),
-            TokenKind::Except | TokenKind::Finally | TokenKind::Eof => Err(ParseError::InvalidSyntax { span: token.span.clone() }),
+            TokenKind::Except | TokenKind::Finally | TokenKind::Eof => Err(ParseError::InvalidSyntax { span: token.span }),
             _ => {
                 let expr = self.parse_expr()?;
                 Ok(Stmt::Expr(expr))

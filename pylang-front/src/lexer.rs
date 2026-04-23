@@ -169,6 +169,12 @@ impl LexerErrors {
     }
 }
 
+impl Default for LexerErrors {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct Lexer<'src> {
     source: &'src str,
     offset: usize,

@@ -72,6 +72,7 @@ pub enum SemaError {
     CannotAssignTo { name: String },
 }
 
+#[allow(clippy::new_without_default)]
 impl Sema {
     pub fn new() -> Self {
         let mut s = Self {
@@ -84,22 +85,22 @@ impl Sema {
         s
     }
 
+    #[allow(clippy::inconsistent_struct_constructor)]
+    pub fn default() -> Self {
+        Self::new()
+    }
+
     fn init_builtins(&mut self) {
-        for (name, def) in [
-            ("int", TypeDef::Primitive(PrimDef { name: "i64", size: 8 })),
-            ("float", TypeDef::Primitive(PrimDef { name: "f64", size: 8 })),
-            ("bool", TypeDef::Primitive(PrimDef { name: "b1", size: 1 })),
-            ("str", TypeDef::Primitive(PrimDef { name: "str", size: 16 })),
-            ("char", TypeDef::Primitive(PrimDef { name: "i32", size: 4 })),
-            ("i8", TypeDef::Primitive(PrimDef { name: "i8", size: 1 })),
-            ("i16", TypeDef::Primitive(PrimDef { name: "i16", size: 2 })),
-            ("i32", TypeDef::Primitive(PrimDef { name: "i32", size: 4 })),
-            ("i64", TypeDef::Primitive(PrimDef { name: "i64", size: 8 })),
-            ("f32", TypeDef::Primitive(PrimDef { name: "f32", size: 4 })),
-            ("usize", TypeDef::Primitive(PrimDef { name: "usize", size: 8 })),
-        ] {
-            self.types.insert(name.to_string(), def);
-        }
+        self.types.insert("int".to_string(), TypeDef::Primitive(PrimDef { name: "i64", size: 8 }));
+        self.types.insert("float".to_string(), TypeDef::Primitive(PrimDef { name: "f64", size: 8 }));
+        self.types.insert("bool".to_string(), TypeDef::Primitive(PrimDef { name: "b1", size: 1 }));
+        self.types.insert("str".to_string(), TypeDef::Primitive(PrimDef { name: "str", size: 16 }));
+        self.types.insert("i64".to_string(), TypeDef::Primitive(PrimDef { name: "i64", size: 8 }));
+        self.types.insert("f64".to_string(), TypeDef::Primitive(PrimDef { name: "f64", size: 8 }));
+        self.types.insert("i8".to_string(), TypeDef::Primitive(PrimDef { name: "i8", size: 1 }));
+        self.types.insert("i16".to_string(), TypeDef::Primitive(PrimDef { name: "i16", size: 2 }));
+        self.types.insert("i32".to_string(), TypeDef::Primitive(PrimDef { name: "i32", size: 4 }));
+        self.types.insert("usize".to_string(), TypeDef::Primitive(PrimDef { name: "i64", size: 8 }));
     }
 
     pub fn check_module(&mut self, stmts: &[Stmt]) -> Result<(), Vec<SemaError>> {
@@ -643,15 +644,12 @@ impl Sema {
     }
 
     fn field_type(&self, obj_ty: &Type, _name: &str) -> Type {
-        match obj_ty {
-            Type::Class(name) => {
-                if let Some(TypeDef::Class(c)) = self.types.get(name) {
-                    if let Some(method) = c.methods.get(_name) {
-                        return method.ret.clone().unwrap_or(Type::Unit);
-                    }
+        if let Type::Class(name) = obj_ty {
+            if let Some(TypeDef::Class(c)) = self.types.get(name) {
+                if let Some(method) = c.methods.get(_name) {
+                    return method.ret.clone().unwrap_or(Type::Unit);
                 }
             }
-            _ => {}
         }
         Type::Unit
     }

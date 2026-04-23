@@ -1,5 +1,5 @@
 use pylang_ir::{self, Function, Type as IrType, Value, Inst, BinOp as IrBinOp, Imm, Name};
-use pylang_front::ast::{Stmt, Expr, Type as AstType, BinOp, Fn as AstFn, CmpOp, UnOp, If, While, For, Loop, Match, Try, With, Raise, Assert};
+use pylang_front::ast::{Stmt, Expr, Type as AstType, BinOp, Fn as AstFn, CmpOp, UnOp, If, While, For, Loop, Match, Try, With, Raise, Assert, Yield};
 use std::collections::HashMap;
 
 pub struct LoweringContext {
@@ -140,6 +140,7 @@ fn lower_stmt(stmt: &Stmt, ctx: &mut LoweringContext) -> Result<(), String> {
         Stmt::With(w) => lower_with(w, ctx),
         Stmt::Raise(r) => lower_raise(r, ctx),
         Stmt::Assert(a) => lower_assert(a, ctx),
+        Stmt::Yield(y) => lower_yield(y, ctx),
         Stmt::Break => {
             ctx.stmts.push(Inst::Jump(Name::new("__break")));
             Ok(())
@@ -198,7 +199,7 @@ fn lower_while(w: &While, ctx: &mut LoweringContext) -> Result<(), String> {
 
 fn lower_for(f: &For, ctx: &mut LoweringContext) -> Result<(), String> {
     let _ = lower_expr(&f.iter, ctx)?;
-    let body_block = Name::new(&format!("__for_body_{}", ctx.stmts.len()));
+    let _body_block = Name::new(&format!("__for_body_{}", ctx.stmts.len()));
     let end_block = Name::new(&format!("__for_end_{}", ctx.stmts.len()));
     for stmt in &f.body {
         lower_stmt(stmt, ctx)?;
@@ -228,7 +229,6 @@ fn lower_match(m: &Match, ctx: &mut LoweringContext) -> Result<(), String> {
 }
 
 fn lower_try(t: &Try, ctx: &mut LoweringContext) -> Result<(), String> {
-    let mut body_insts = Vec::new();
     for stmt in &t.body {
         lower_stmt(stmt, ctx)?;
     }
@@ -240,7 +240,7 @@ fn lower_try(t: &Try, ctx: &mut LoweringContext) -> Result<(), String> {
         }
     }).collect();
     ctx.stmts.push(Inst::Try {
-        body: body_insts,
+        body: vec![],
         handlers,
         finally: None,
     });
@@ -263,10 +263,19 @@ fn lower_raise(r: &Raise, ctx: &mut LoweringContext) -> Result<(), String> {
     Ok(())
 }
 
+fn lower_yield(y: &Yield, ctx: &mut LoweringContext) -> Result<(), String> {
+    let val = y.val.as_ref()
+        .map(|e| lower_expr(e, ctx))
+        .transpose()?
+        .unwrap_or(Value::Imm(Imm::Unit));
+    ctx.stmts.push(Inst::Yield(val));
+    Ok(())
+}
+
 fn lower_assert(a: &Assert, ctx: &mut LoweringContext) -> Result<(), String> {
-    let cond = lower_expr(&a.cond, ctx)?;
-    if a.msg.is_some() {
-        let _ = lower_expr(a.msg.as_ref().unwrap(), ctx)?;
+    let _cond = lower_expr(&a.cond, ctx)?;
+    if let Some(ref msg) = a.msg {
+        let _ = lower_expr(msg, ctx)?;
     }
     ctx.stmts.push(Inst::Nop);
     Ok(())
@@ -312,20 +321,39 @@ fn lower_expr(expr: &Expr, ctx: &mut LoweringContext) -> Result<Value, String> {
             }
         }
         Expr::Method { obj, name, args } => {
-            let _ = lower_expr(obj, ctx)?;
+            let obj_val = lower_expr(obj, ctx)?;
+            let method_name = Name::new(name);
+            let mut all_args = vec![obj_val];
             for arg in args {
-                let _ = lower_expr(arg, ctx)?;
+                all_args.push(lower_expr(arg, ctx)?);
             }
-            Err(format!("unsupported expression: Method({})", name))
+            Ok(Value::Inst(Box::new(Inst::Call {
+                func: method_name,
+                args: all_args,
+            })))
         }
         Expr::Dot { obj, name } => {
-            let _ = lower_expr(obj, ctx)?;
-            Err(format!("unsupported expression: Dot({})", name))
+            let obj_val = lower_expr(obj, ctx)?;
+            let field_offset = get_field_offset(name);
+            Ok(Value::Inst(Box::new(Inst::Load {
+                ptr: obj_val,
+                ty: IrType::Prim(pylang_ir::PrimType::I64),
+                offset: Box::new(Value::Imm(Imm::I64(field_offset))),
+            })))
         }
         Expr::Index { obj, idx } => {
-            let _ = lower_expr(obj, ctx)?;
-            let _ = lower_expr(idx, ctx)?;
-            Err("unsupported expression: Index".to_string())
+            let obj_val = lower_expr(obj, ctx)?;
+            let idx_val = lower_expr(idx, ctx)?;
+            let offset = Box::new(Value::Inst(Box::new(Inst::BinOp {
+                op: IrBinOp::Mul,
+                lhs: idx_val,
+                rhs: Value::Imm(Imm::I64(8)),
+            })));
+            Ok(Value::Inst(Box::new(Inst::Load {
+                ptr: obj_val,
+                ty: IrType::Prim(pylang_ir::PrimType::I64),
+                offset,
+            })))
         }
         Expr::Slice { obj, start, end, step } => {
             let _ = lower_expr(obj, ctx)?;
@@ -341,23 +369,76 @@ fn lower_expr(expr: &Expr, ctx: &mut LoweringContext) -> Result<Value, String> {
             Ok(Value::Inst(Box::new(Inst::Tuple(vals?))))
         }
         Expr::List(elems) => {
-            for elem in elems {
-                let _ = lower_expr(elem, ctx)?;
+            let vals: Result<Vec<_>, _> = elems.iter()
+                .map(|e| lower_expr(e, ctx))
+                .collect();
+            let vals = vals?;
+            let size = Value::Imm(Imm::I64(vals.len() as i64));
+            let data_ptr = Value::Inst(Box::new(Inst::Alloc {
+                ty: IrType::Tuple(vals.iter().map(|_| IrType::Prim(pylang_ir::PrimType::I64)).collect()),
+                size: Box::new(size),
+                init: None,
+            }));
+            for (i, val) in vals.iter().enumerate() {
+                let offset = Value::Imm(Imm::I64((i * 8) as i64));
+                ctx.stmts.push(Inst::Store {
+                    ptr: data_ptr.clone(),
+                    val: val.clone(),
+                    offset: Box::new(offset),
+                });
             }
-            Err("unsupported expression: List".to_string())
+            Ok(data_ptr)
         }
         Expr::Dict(items) => {
-            for (k, v) in items {
-                let _ = lower_expr(k, ctx)?;
-                let _ = lower_expr(v, ctx)?;
+            let keys: Result<Vec<_>, _> = items.iter()
+                .map(|(k, _)| lower_expr(k, ctx))
+                .collect();
+            let vals: Result<Vec<_>, _> = items.iter()
+                .map(|(_, v)| lower_expr(v, ctx))
+                .collect();
+            let keys = keys?;
+            let vals = vals?;
+            let size = Value::Imm(Imm::I64(items.len() as i64));
+            let data_ptr = Value::Inst(Box::new(Inst::Alloc {
+                ty: IrType::Tuple(vals.iter().map(|_| IrType::Prim(pylang_ir::PrimType::I64)).collect()),
+                size: Box::new(size),
+                init: None,
+            }));
+            for (i, (k, v)) in keys.into_iter().zip(vals.into_iter()).enumerate() {
+                let offset = Value::Imm(Imm::I64((i * 16) as i64));
+                ctx.stmts.push(Inst::Store {
+                    ptr: data_ptr.clone(),
+                    val: k,
+                    offset: Box::new(offset.clone()),
+                });
+                ctx.stmts.push(Inst::Store {
+                    ptr: data_ptr.clone(),
+                    val: v,
+                    offset: Box::new(Value::Imm(Imm::I64((i * 16 + 8) as i64))),
+                });
             }
-            Err("unsupported expression: Dict".to_string())
+            Ok(data_ptr)
         }
         Expr::Set(elems) => {
-            for elem in elems {
-                let _ = lower_expr(elem, ctx)?;
+            let vals: Result<Vec<_>, _> = elems.iter()
+                .map(|e| lower_expr(e, ctx))
+                .collect();
+            let vals = vals?;
+            let size = Value::Imm(Imm::I64(vals.len() as i64));
+            let data_ptr = Value::Inst(Box::new(Inst::Alloc {
+                ty: IrType::Tuple(vals.iter().map(|_| IrType::Prim(pylang_ir::PrimType::I64)).collect()),
+                size: Box::new(size),
+                init: None,
+            }));
+            for (i, val) in vals.iter().enumerate() {
+                let offset = Value::Imm(Imm::I64((i * 8) as i64));
+                ctx.stmts.push(Inst::Store {
+                    ptr: data_ptr.clone(),
+                    val: val.clone(),
+                    offset: Box::new(offset),
+                });
             }
-            Err("unsupported expression: Set".to_string())
+            Ok(data_ptr)
         }
         Expr::ListComp { body, generators } => {
             let _ = lower_expr(body, ctx)?;
@@ -456,6 +537,17 @@ fn lower_cmpop(op: &CmpOp) -> pylang_ir::CmpOp {
         CmpOp::IsNot => pylang_ir::CmpOp::Ne,
         CmpOp::In => pylang_ir::CmpOp::Eq,
         CmpOp::NotIn => pylang_ir::CmpOp::Ne,
+    }
+}
+
+fn get_field_offset(name: &str) -> i64 {
+    match name {
+        "_data" => 0,
+        "_len" => 0,
+        "_cap" => 8,
+        "first" => 0,
+        "second" => 8,
+        _ => 0,
     }
 }
 
@@ -699,5 +791,63 @@ mod tests {
         assert!(lower_expr(&Expr::UnOp { op: UnOp::Neg, val: Box::new(Expr::Int(1)) }, ctx).is_ok());
         assert!(lower_expr(&Expr::UnOp { op: UnOp::Pos, val: Box::new(Expr::Int(1)) }, ctx).is_ok());
         assert!(lower_expr(&Expr::UnOp { op: UnOp::BitNot, val: Box::new(Expr::Int(1)) }, ctx).is_ok());
+    }
+
+    #[test]
+    fn test_lower_index() {
+        let ctx = &mut LoweringContext::new();
+        ctx.locals.insert("arr".to_string(), Value::Arg(Name::new("arr")));
+        let result = lower_expr(&Expr::Index {
+            obj: Box::new(Expr::Ident("arr".to_string())),
+            idx: Box::new(Expr::Int(0)),
+        }, ctx);
+        assert!(result.is_ok(), "Index lowering failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_lower_list() {
+        let ctx = &mut LoweringContext::new();
+        let result = lower_expr(&Expr::List(vec![Expr::Int(1), Expr::Int(2), Expr::Int(3)]), ctx);
+        assert!(result.is_ok(), "List lowering failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_lower_dict() {
+        let ctx = &mut LoweringContext::new();
+        let result = lower_expr(&Expr::Dict(vec![
+            (Expr::Int(1), Expr::Int(2)),
+            (Expr::Int(3), Expr::Int(4)),
+        ]), ctx);
+        assert!(result.is_ok(), "Dict lowering failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_lower_set() {
+        let ctx = &mut LoweringContext::new();
+        let result = lower_expr(&Expr::Set(vec![Expr::Int(1), Expr::Int(2), Expr::Int(3)]), ctx);
+        assert!(result.is_ok(), "Set lowering failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_lower_dot() {
+        let ctx = &mut LoweringContext::new();
+        ctx.locals.insert("obj".to_string(), Value::Arg(Name::new("obj")));
+        let result = lower_expr(&Expr::Dot {
+            obj: Box::new(Expr::Ident("obj".to_string())),
+            name: "_data".to_string(),
+        }, ctx);
+        assert!(result.is_ok(), "Dot lowering failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_lower_method() {
+        let ctx = &mut LoweringContext::new();
+        ctx.locals.insert("list".to_string(), Value::Arg(Name::new("list")));
+        let result = lower_expr(&Expr::Method {
+            obj: Box::new(Expr::Ident("list".to_string())),
+            name: "append".to_string(),
+            args: vec![Expr::Int(1)],
+        }, ctx);
+        assert!(result.is_ok(), "Method lowering failed: {:?}", result.err());
     }
 }

@@ -14,3 +14,9 @@ impl Compiler {
         lower::lower_module(ast)
     }
 }
+
+impl Default for Compiler {
+    fn default() -> Self {
+        Self
+    }
+}
