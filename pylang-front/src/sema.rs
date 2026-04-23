@@ -101,6 +101,56 @@ impl Sema {
         self.types.insert("i16".to_string(), TypeDef::Primitive(PrimDef { name: "i16", size: 2 }));
         self.types.insert("i32".to_string(), TypeDef::Primitive(PrimDef { name: "i32", size: 4 }));
         self.types.insert("usize".to_string(), TypeDef::Primitive(PrimDef { name: "i64", size: 8 }));
+
+        let print_any = Type::Fn { params: vec![Type::Generic { base: "object".to_string(), args: vec![] }], ret: Box::new(Type::Unit) };
+
+        self.names.insert("print".to_string(), ResolvedName {
+            name: "print".to_string(),
+            ty: print_any,
+            def: NameDef::Function,
+        });
+
+        self.names.insert("len".to_string(), ResolvedName {
+            name: "len".to_string(),
+            ty: Type::Fn { params: vec![Type::Generic { base: "object".to_string(), args: vec![] }], ret: Box::new(Type::I64) },
+            def: NameDef::Function,
+        });
+
+        self.names.insert("range".to_string(), ResolvedName {
+            name: "range".to_string(),
+            ty: Type::Fn { params: vec![Type::I64], ret: Box::new(Type::Generic { base: "list".to_string(), args: vec![Type::I64] }) },
+            def: NameDef::Function,
+        });
+
+        self.names.insert("int".to_string(), ResolvedName {
+            name: "int".to_string(),
+            ty: Type::Fn { params: vec![Type::Generic { base: "object".to_string(), args: vec![] }], ret: Box::new(Type::I64) },
+            def: NameDef::Function,
+        });
+
+        self.names.insert("str".to_string(), ResolvedName {
+            name: "str".to_string(),
+            ty: Type::Fn { params: vec![Type::Generic { base: "object".to_string(), args: vec![] }], ret: Box::new(Type::Named("str".to_string())) },
+            def: NameDef::Function,
+        });
+
+        self.names.insert("bool".to_string(), ResolvedName {
+            name: "bool".to_string(),
+            ty: Type::Fn { params: vec![Type::Generic { base: "object".to_string(), args: vec![] }], ret: Box::new(Type::Bool) },
+            def: NameDef::Function,
+        });
+
+        self.names.insert("float".to_string(), ResolvedName {
+            name: "float".to_string(),
+            ty: Type::Fn { params: vec![Type::Generic { base: "object".to_string(), args: vec![] }], ret: Box::new(Type::F64) },
+            def: NameDef::Function,
+        });
+
+        self.names.insert("input".to_string(), ResolvedName {
+            name: "input".to_string(),
+            ty: Type::Fn { params: vec![], ret: Box::new(Type::Named("str".to_string())) },
+            def: NameDef::Function,
+        });
     }
 
     pub fn check_module(&mut self, stmts: &[Stmt]) -> Result<(), Vec<SemaError>> {

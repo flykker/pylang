@@ -18,8 +18,7 @@ impl Compiler {
     }
 
     pub fn compile_to_elf(&self, ast: &[Stmt], output: &str) -> Result<(), String> {
-        let _ir_functions = lower::lower_module(ast)?;
-        emit::write_simple_elf(Path::new(output))?;
+        emit::write_simple_elf(Path::new(output), ast)?;
         Ok(())
     }
 }

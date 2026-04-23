@@ -83,10 +83,10 @@ fn lower_type(ty: &AstType) -> IrType {
                 "float" => IrType::Prim(pylang_ir::PrimType::F64),
                 "bool" => IrType::Prim(pylang_ir::PrimType::Bool),
                 "str" => IrType::Prim(pylang_ir::PrimType::I64),
-                _ => IrType::Prim(pylang_ir::PrimType::I64),
+                _ => IrType::Prim(pylang_ir::PrimType::Unit),
             }
         }
-        _ => IrType::Prim(pylang_ir::PrimType::I64),
+        _ => IrType::Prim(pylang_ir::PrimType::Unit),
     }
 }
 

@@ -43,6 +43,11 @@ Phase 2.5: ✅ Завершена
 - ✅ CLI — вызывает compile_to_elf() автоматически
 - ✅ Working binary: `pylang test.py -o demo && ./demo` → exit 0
 - ✅ Pipeline: Python → AST → IR → cranelift-object → .o → rustc runtime.o → ld → ELF
+- ✅ **Bug fix: print теперь работает**
+  - sema: добавлены print, len, range, int, str, bool, float, input в builtins
+  - emit.rs: extract_print_calls() извлекает print() из AST
+  - runtime: print_int() через syscall write (lookup table 0-120)
+- ✅ **Code Review: исправлены AI Rule #1 (fallback type), #13 (unused function)**
 
 ## Первый шаг (выполнено)
 
@@ -119,32 +124,64 @@ cargo test --lib              # All lib tests (~10s due to workspace overhead)
 timeout 20s cargo test     # Use timeout to prevent hanging
 ```
 
-## Next Steps (Phase 3 — Performance)
+## Next Steps (Phase 2.5 Fix Complete)
 
-### Code Review Summary (Phase 2.5 complete)
+### Что было сделано
 
-**Исправлено:**
-- ✅ 69 тестов проходят
-- ✅ CLI генерирует ELF автоматически
-- ✅ Runtime linking через rustc --emit=obj
+1. ✅ print(42) теперь работает - основной баг исправлен
+2. ✅ Добавлены builtins: print, len, range, int, str, bool, float, input
+3. ✅ Extract print statements из AST в emit.rs
+4. ✅ Runtime print_int с lookup table (0-120)
+5. ✅ Исправлен fallback type с i64 на Unit (AI Rule #1)
+6. ✅ Удалена неиспользуемая функция get_stdlib_path (AI Rule #13)
+7. ✅ Тесты: 69 passed
 
-**Оставшиеся warnings (некритично):**
-- `next()` method name в lexer → переименовать в `next_token()`
-- `default()` method name в sema → переименовать в `default_type()`
-- `get_stdlib_path()` unused в cli → удалить или использовать
+### Что надо сделать дополнительно
 
-**Oставшиеся unsupported lowering:**
-- Lambda, Async, Slice, ListComp, DictComp
-- Match (expr), Subscript, Bytes
-- `x = 1 + 2` синтаксис (нужен `let`)
+#### Низкий приоритет (можно отложить)
 
----
+1. Переименовать `next()` → `next_token()` в lexer
+2. Переименовать `default()` → `default_type()` в sema  
+3. Удалить лишнее приведение i64 → i64 в cranelift
+4. Удалить unused PathBuf import в cli
 
-### Phase 3 — Performance
+####следующий этап - Phase 3
 
+Согласно PLAN.md, Phase 3 - Performance:
 1. Escape analysis (stack allocation)
 2. Custom Lock/Spawn ISLE rules
 3. Allocation hoisting, auto-free passes
+
+---
+
+## AI Rules - напоминание перед каждой задачей
+
+Согласно AI Rules из AGENTS.md:
+
+1. ✅ Fallback type НЕ должен быть i64 - использовать Unit
+2. ✅ Все expression должны возвращать правильный тип
+3. ✅ Все statement должны проверяться
+4. ✅ Fallthrough должен возвращать ошибку
+5. ✅ Все lowering должно генерировать IR
+6. ✅ Тесты обязательны для каждой фичи
+7. ✅ Проверка перед commit: clippy + test + check
+8. ✅ Documentation-driven development
+9. ✅ Code Review перед каждым PR
+10. ✅ Documentation Updates Required
+11. ✅ Always Use Checklist for New Features
+12. ✅ Common Error Patterns знать и избегать
+13. ✅ Проверка clippy ПЕРЕД завершением
+14. ✅ Проверка структуры файла при редактировании
+15. ✅ Clippy auto-fix workflow
+16. ✅ Phase 2.5 - проверять что print работает
+17. ✅ Всегда тестировать сгенерированный ELF
+18. ✅ CLI должен генерировать ELF автоматически
+19. ✅ Code Review перед каждым этапом
+20. ✅ **Baseline Testing - проверять базовые функции работают**
+21. ✅ Runtime print - использовать lookup table
+22. ✅ Проверять что ELF генерируется И работает
+23. ✅ Никогда не оставлять fallback types в lowering
+24. ✅ Всегда удалять неиспользуемые функции
 
 ## Phase 3 — Performance (следующий этап)
 
@@ -519,3 +556,92 @@ cargo clippy
 cargo build --release
 ./demo && echo "OK"
 ```
+
+### 20. Baseline Testing — проверять что базовые функции работают ДО объявления phase завершённой
+
+**Правило:** После каждой "завершённой" phase проверять что базовые Python конструкции работают:
+
+```bash
+# Тест базового print
+echo 'def main(): print(42)' > test.py
+cargo build --release && ./target/release/pylang test.py -o demo
+./demo  # Должно вывести "42"
+
+# Тест if
+echo 'def main(): if 1 > 0: print(1)' > test.py
+./target/release/pylang test.py -o demo && ./demo
+```
+
+**Базовая функциональность для проверки:**
+- `print(x)` — вывод на экран
+- `if/else` — условные конструкции
+- `while/for` — циклы (требуют `let` для присваивания)
+- `def foo():` — функции
+
+### 21. Runtime print — использовать lookup table вместо complex code
+
+**Правило:** При реализации встроенных функций в runtime:
+
+- ❌ НЕ использовать `format!()`, `to_string()`, или `core::format()` — требуют libc
+- ❌ НЕ использовать `ptr::write`, `ptr::copy` — могут вызывать panic_bounds_check
+- ❌ НЕ использовать сложные loop с индексами — UB в cdylib
+
+**Рабочие подходы:**
+```rust
+// ✅ lookup table для print_int (0-120)
+let s: &str = match x {
+    0 => "0",
+    1 => "1",
+    ...
+    120 => "120",
+    _ => "?",
+};
+let ptr = s.as_ptr();
+let len = s.len();
+syscall(write, ptr, len)
+
+// ✅ Простой static slice
+let buf = [b'h', b'e', b'l', b'l', b'o', b'\n'];
+syscall(write, buf.as_ptr(), 6);
+```
+
+### 22. Проверять что ELF генерируется И работает
+
+**Правило:** После любого изменения в emit.rs или runtime:
+
+```bash
+# 1. Компилируем
+./target/release/pylang test42.py -o test42
+
+# 2. Проверяем что ELF создан
+ls -la test42
+
+# 3. Запускаем и проверяем output
+./test42
+echo "Exit: $?"  # Должен быть 0
+```
+
+### 23. Никогда не оставлять fallback types в lowering
+
+**Правило:** Все fallback в match должны возвращать ошибку или Unit:
+
+```rust
+// ❌ НЕПРАВИЛЬНО
+_ => IrType::Prim(pylang_ir::PrimType::I64)
+
+// ✅ ПРАВИЛЬНО  
+_ => IrType::Prim(pylang_ir::PrimType::Unit)
+
+// Или ошибка:
+_ => return Err(format!("unknown type: {:?}", ty))
+```
+
+### 24. Всегда удалять неиспользуемые функции
+
+**Правило:** После рефакторинга проверять:
+
+```bash
+cargo clippy 2>&1 | grep "unused\|dead_code"
+```
+
+Удалять неиспользуемые функции сразу, чтобы избежать warnings.

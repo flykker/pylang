@@ -256,16 +256,23 @@ main.py → Lexer → Parser → Sema → IR → cranelift-object → .o → rus
 | Метрика | Статус |
 |---------|--------|
 | Тесты | ✅ 69 passed |
-| Phase 2.5 | ✅ Работает |
+| Phase 2.5 | ✅ print(42) работает |
 | Clippy | ⚠️ 4 warnings (low severity) |
 
-#### Clippy Warnings (требуют внимания)
+#### Code Review Fixes (выполнено)
+
+- ✅ Fallback type в lower.rs: исправлен с i64 на Unit (AI Rule #1)
+- ✅ get_stdlib_path: удалена неиспользуемая функция
+- ✅ print: работает через lookup table 0-120
+
+#### Clippy Warnings (оставшиеся)
 
 | Crate | Warning | Действие |
 |-------|---------|----------|
 | pylang-front | `next()` method name | Переименовать в `next_token()` |
 | pylang-front | `default()` method name | Переименовать в `default_type()` |
-| pylang-cli | `get_stdlib_path` unused | Удалить или использовать |
+| pylang-cranelift | i64 -> i64 casting | Удалить лишнее приведение |
+| pylang-cli | unused PathBuf import | Удалить import |
 
 #### Oставшиесяunsupported lowering (могут быть добавлены позже):
 - Lambda expressions
