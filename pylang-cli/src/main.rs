@@ -89,19 +89,14 @@ fn main() -> Result<()> {
                     }
                 }
             } else {
-                println!("Compiling to IR...");
+                println!("Compiling to ELF...");
                 let compiler = Compiler::new();
-                match compiler.compile(&ast) {
-                    Ok(functions) => {
-                        println!("Compiled {} functions", functions.len());
-                        
-                        if args.emit.is_none() {
-                            println!("Note: Full codegen not implemented yet");
-                            println!("Use --emit ir to see IR output");
-                        }
+                match compiler.compile_to_elf(&ast, &args.output) {
+                    Ok(()) => {
+                        println!("Compiled to ELF: {}", args.output);
                     }
                     Err(e) => {
-                        eprintln!("Compilation error: {}", e);
+                        eprintln!("ELF generation error: {}", e);
                         process::exit(1);
                     }
                 }
