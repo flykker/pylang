@@ -49,7 +49,8 @@ unsafe fn syscall3(n: usize, a1: usize, a2: usize, a3: usize) -> usize {
 #[no_mangle]
 pub extern "C" fn exit(code: i32) -> ! {
     unsafe { syscall3(60, code as usize, 0, 0); }
-    loop {}
+    // syscall never returns; unreachable_unchecked avoids clippy empty_loop warning
+    unsafe { core::hint::unreachable_unchecked() }
 }
 
 struct PrintBuf(UnsafeCell<[u8; 64]>);

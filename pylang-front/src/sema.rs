@@ -86,7 +86,7 @@ impl Sema {
     }
 
     #[allow(clippy::inconsistent_struct_constructor)]
-    pub fn default() -> Self {
+    pub fn default_type() -> Self {
         Self::new()
     }
 

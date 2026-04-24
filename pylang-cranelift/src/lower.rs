@@ -7,11 +7,17 @@ use pylang_front::ast::{
 };
 use std::collections::HashMap;
 
+struct LoopContext {
+    exit_block: Block,
+    continue_block: Block,
+}
+
 pub struct LowerCtx<'a> {
     pub builder: FunctionBuilder<'a>,
     pub module: &'a mut dyn Module,
     pub locals: HashMap<String, Variable>,
     pub block_filled: bool,
+    loop_stack: Vec<LoopContext>,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -22,6 +28,31 @@ impl<'a> LowerCtx<'a> {
 
     fn create_block(&mut self) -> Block {
         self.builder.create_block()
+    }
+
+    fn push_loop(&mut self, exit_block: Block, continue_block: Block) {
+        self.loop_stack.push(LoopContext {
+            exit_block,
+            continue_block,
+        });
+    }
+
+    fn pop_loop(&mut self) {
+        self.loop_stack.pop();
+    }
+
+    fn break_loop(&mut self) {
+        if let Some(ctx) = self.loop_stack.last() {
+            self.builder.ins().jump(ctx.exit_block, &[]);
+            self.block_filled = true;
+        }
+    }
+
+    fn continue_loop(&mut self) {
+        if let Some(ctx) = self.loop_stack.last() {
+            self.builder.ins().jump(ctx.continue_block, &[]);
+            self.block_filled = true;
+        }
     }
 }
 
@@ -85,6 +116,7 @@ pub fn lower_fn(module: &mut dyn Module, f: &AstFn) -> Result<FuncId, String> {
         module,
         locals,
         block_filled: false,
+        loop_stack: Vec::new(),
     };
 
     for stmt in &f.body {
@@ -203,8 +235,14 @@ fn lower_stmt(stmt: &Stmt, lctx: &mut LowerCtx) -> Result<(), String> {
         Stmt::Raise(r) => lower_raise(r, lctx),
         Stmt::Assert(a) => lower_assert(a, lctx),
         Stmt::Yield(y) => lower_yield(y, lctx),
-        Stmt::Break => Err("break not yet supported in CLIF lowering".to_string()),
-        Stmt::Continue => Err("continue not yet supported in CLIF lowering".to_string()),
+        Stmt::Break => {
+            lctx.break_loop();
+            Ok(())
+        }
+        Stmt::Continue => {
+            lctx.continue_loop();
+            Ok(())
+        }
         Stmt::Pass => Ok(()),
         _ => Err(format!("unsupported statement: {:?}", stmt)),
     }
@@ -219,7 +257,7 @@ fn lower_expr(expr: &Expr, lctx: &mut LowerCtx) -> Result<Value, String> {
             let bytes = s.as_bytes();
             alloc_string_literal(lctx, bytes)
         }
-        Expr::Char(c) => Ok(lctx.builder.ins().iconst(types::I32, *c as i64)),
+        Expr::Char(c) => Ok(lctx.builder.ins().iconst(types::I64, *c as i64)),
         Expr::None => Ok(lctx.builder.ins().iconst(types::I64, 0)),
         Expr::Ident(name) => {
             let var = lctx.locals.get(name)
@@ -585,24 +623,39 @@ fn lower_while(w: &While, lctx: &mut LowerCtx) -> Result<(), String> {
     let body_block = lctx.create_block();
     let exit_block = lctx.create_block();
 
+    lctx.push_loop(exit_block, header_block);
+
+    // Jump from current block into loop header
     lctx.builder.ins().jump(header_block, &[]);
     lctx.block_filled = true;
 
+    // Header block: evaluate condition
     lctx.switch_to_block(header_block);
     let cond = lower_expr(&w.cond, lctx)?;
     lctx.builder.ins().brif(cond, body_block, &[], exit_block, &[]);
     lctx.block_filled = true;
 
+    // Body block: execute loop body
     lctx.switch_to_block(body_block);
     for stmt in &w.body {
         if lctx.block_filled { break; }
         lower_stmt(stmt, lctx)?;
     }
     if !lctx.block_filled {
+        // Normal loop completion: jump back to header
         lctx.builder.ins().jump(header_block, &[]);
         lctx.block_filled = true;
     }
 
+    lctx.builder.seal_block(header_block);
+    lctx.builder.seal_block(body_block);
+    // Do NOT seal exit_block here — subsequent statements may use
+    // variables modified in the loop, and Cranelift needs to see
+    // all uses before sealing to build correct SSA block parameters.
+    // seal_all_blocks() in lower_fn will seal it at the end.
+    lctx.pop_loop();
+
+    // Continue with subsequent statements in exit block
     lctx.switch_to_block(exit_block);
 
     Ok(())
@@ -623,30 +676,38 @@ fn lower_for(f: &For, lctx: &mut LowerCtx) -> Result<(), String> {
                 lctx.builder.def_var(var, zero);
                 lctx.locals.insert(f.target.clone(), var);
 
+                lctx.push_loop(exit_block, header_block);
+
                 lctx.builder.ins().jump(header_block, &[]);
                 lctx.block_filled = true;
 
                 lctx.switch_to_block(header_block);
                 let i = lctx.builder.use_var(var);
                 let cond = lctx.builder.ins().icmp(IntCC::SignedLessThan, i, end_val);
-    lctx.builder.ins().brif(cond, body_block, &[], exit_block, &[]);
-    lctx.block_filled = true;
+                lctx.builder.ins().brif(cond, body_block, &[], exit_block, &[]);
+                lctx.block_filled = true;
 
-    lctx.switch_to_block(body_block);
+                lctx.switch_to_block(body_block);
                 for stmt in &f.body {
                     if lctx.block_filled { break; }
                     lower_stmt(stmt, lctx)?;
                 }
-    if !lctx.block_filled {
-        let i = lctx.builder.use_var(var);
-        let one = lctx.builder.ins().iconst(types::I64, 1);
-        let next = lctx.builder.ins().iadd(i, one);
-        lctx.builder.def_var(var, next);
-        lctx.builder.ins().jump(header_block, &[]);
-        lctx.block_filled = true;
-    }
+                if !lctx.block_filled {
+                    let i = lctx.builder.use_var(var);
+                    let one = lctx.builder.ins().iconst(types::I64, 1);
+                    let next = lctx.builder.ins().iadd(i, one);
+                    lctx.builder.def_var(var, next);
+                    lctx.builder.ins().jump(header_block, &[]);
+                    lctx.block_filled = true;
+                }
 
-    lctx.switch_to_block(exit_block);
+                lctx.builder.seal_block(header_block);
+                lctx.builder.seal_block(body_block);
+                // Do NOT seal exit_block here — subsequent statements may use
+                // variables modified in the loop.
+                lctx.pop_loop();
+
+                lctx.switch_to_block(exit_block);
 
                 return Ok(());
             }
@@ -659,6 +720,8 @@ fn lower_for(f: &For, lctx: &mut LowerCtx) -> Result<(), String> {
 fn lower_loop(l: &Loop, lctx: &mut LowerCtx) -> Result<(), String> {
     let body_block = lctx.create_block();
     let exit_block = lctx.create_block();
+
+    lctx.push_loop(exit_block, body_block);
 
     lctx.builder.ins().jump(body_block, &[]);
     lctx.block_filled = true;
@@ -673,56 +736,29 @@ fn lower_loop(l: &Loop, lctx: &mut LowerCtx) -> Result<(), String> {
         lctx.block_filled = true;
     }
 
+    lctx.builder.seal_block(body_block);
+    // Do NOT seal exit_block here
+    lctx.pop_loop();
+
     lctx.switch_to_block(exit_block);
 
     Ok(())
 }
 
-fn lower_match(m: &Match, lctx: &mut LowerCtx) -> Result<(), String> {
-    let _expr = lower_expr(&m.expr, lctx)?;
-    for arm in &m.arms {
-        for stmt in &arm.body {
-            if lctx.block_filled { break; }
-            lower_stmt(stmt, lctx)?;
-        }
-    }
-    Ok(())
+fn lower_match(_m: &Match, _lctx: &mut LowerCtx) -> Result<(), String> {
+    Err("match lowering not yet supported".to_string())
 }
 
-fn lower_try(t: &Try, lctx: &mut LowerCtx) -> Result<(), String> {
-    for stmt in &t.body {
-        if lctx.block_filled { break; }
-        lower_stmt(stmt, lctx)?;
-    }
-    for handler in &t.handlers {
-        for stmt in &handler.body {
-            if lctx.block_filled { break; }
-            lower_stmt(stmt, lctx)?;
-        }
-    }
-    if let Some(finally) = &t.finally {
-        for stmt in finally {
-            if lctx.block_filled { break; }
-            lower_stmt(stmt, lctx)?;
-        }
-    }
-    Ok(())
+fn lower_try(_t: &Try, _lctx: &mut LowerCtx) -> Result<(), String> {
+    Err("try/except lowering not yet supported".to_string())
 }
 
-fn lower_with(w: &With, lctx: &mut LowerCtx) -> Result<(), String> {
-    for item in &w.items {
-        let _ = lower_expr(&item.expr, lctx)?;
-    }
-    for stmt in &w.body {
-        if lctx.block_filled { break; }
-        lower_stmt(stmt, lctx)?;
-    }
-    Ok(())
+fn lower_with(_w: &With, _lctx: &mut LowerCtx) -> Result<(), String> {
+    Err("with lowering not yet supported".to_string())
 }
 
-fn lower_raise(r: &Raise, lctx: &mut LowerCtx) -> Result<(), String> {
-    let _exc = lower_expr(&r.exc, lctx)?;
-    Ok(())
+fn lower_raise(_r: &Raise, _lctx: &mut LowerCtx) -> Result<(), String> {
+    Err("raise lowering not yet supported".to_string())
 }
 
 fn lower_assert(a: &Assert, lctx: &mut LowerCtx) -> Result<(), String> {
@@ -745,11 +781,8 @@ fn lower_assert(a: &Assert, lctx: &mut LowerCtx) -> Result<(), String> {
     Ok(())
 }
 
-fn lower_yield(y: &Yield, lctx: &mut LowerCtx) -> Result<(), String> {
-    let _val = y.val.as_ref()
-        .map(|e| lower_expr(e, lctx))
-        .transpose()?;
-    Ok(())
+fn lower_yield(_y: &Yield, _lctx: &mut LowerCtx) -> Result<(), String> {
+    Err("yield lowering not yet supported".to_string())
 }
 
 #[cfg(test)]

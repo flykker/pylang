@@ -195,7 +195,7 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    pub fn next(&mut self) -> Option<Spanned<TokenKind>> {
+    pub fn next_token(&mut self) -> Option<Spanned<TokenKind>> {
         if self.offset >= self.source.len() {
             return None;
         }
@@ -498,46 +498,46 @@ mod tests {
     #[test]
     fn test_integer_token() {
         let mut lexer = Lexer::new("42");
-        let tok = lexer.next().unwrap();
+        let tok = lexer.next_token().unwrap();
         assert!(matches!(tok.value, TokenKind::Int(42)));
     }
 
     #[test]
     fn test_float_token() {
         let mut lexer = Lexer::new("3.14");
-        let tok = lexer.next().unwrap();
+        let tok = lexer.next_token().unwrap();
         assert!(matches!(tok.value, TokenKind::Float(f) if (f - 3.14).abs() < 0.001));
     }
 
     #[test]
     fn test_string_token() {
         let mut lexer = Lexer::new("\"hello\"");
-        let tok = lexer.next().unwrap();
+        let tok = lexer.next_token().unwrap();
         assert!(matches!(tok.value, TokenKind::Str(s) if s == "hello"));
     }
 
     #[test]
     fn test_keywords() {
         let mut lexer = Lexer::new("def if while return");
-        assert!(matches!(lexer.next().unwrap().value, TokenKind::Def));
-        assert!(matches!(lexer.next().unwrap().value, TokenKind::If));
-        assert!(matches!(lexer.next().unwrap().value, TokenKind::While));
-        assert!(matches!(lexer.next().unwrap().value, TokenKind::Return));
+        assert!(matches!(lexer.next_token().unwrap().value, TokenKind::Def));
+        assert!(matches!(lexer.next_token().unwrap().value, TokenKind::If));
+        assert!(matches!(lexer.next_token().unwrap().value, TokenKind::While));
+        assert!(matches!(lexer.next_token().unwrap().value, TokenKind::Return));
     }
 
     #[test]
     fn test_identifiers() {
         let mut lexer = Lexer::new("foo bar");
-        assert!(matches!(lexer.next().unwrap().value, TokenKind::Ident(s) if s == "foo"));
-        assert!(matches!(lexer.next().unwrap().value, TokenKind::Ident(s) if s == "bar"));
+        assert!(matches!(lexer.next_token().unwrap().value, TokenKind::Ident(s) if s == "foo"));
+        assert!(matches!(lexer.next_token().unwrap().value, TokenKind::Ident(s) if s == "bar"));
     }
 
     #[test]
     fn test_operators() {
         let mut lexer = Lexer::new("+ - * /");
-        assert!(matches!(lexer.next().unwrap().value, TokenKind::Plus));
-        assert!(matches!(lexer.next().unwrap().value, TokenKind::Minus));
-        assert!(matches!(lexer.next().unwrap().value, TokenKind::Star));
-        assert!(matches!(lexer.next().unwrap().value, TokenKind::Slash));
+        assert!(matches!(lexer.next_token().unwrap().value, TokenKind::Plus));
+        assert!(matches!(lexer.next_token().unwrap().value, TokenKind::Minus));
+        assert!(matches!(lexer.next_token().unwrap().value, TokenKind::Star));
+        assert!(matches!(lexer.next_token().unwrap().value, TokenKind::Slash));
     }
 }

@@ -231,42 +231,6 @@ main.py → Lexer → Parser → Sema → IR → cranelift-object → .o → rus
 
 ---
 
-### Code Review Summary (все phases)
-
-#### Метрики качества
-
-| Метрика | Статус |
-|---------|--------|
-| Тесты | ✅ 69 passed |
-| Phase 2.5 | ✅ print(42) работает |
-| Clippy | ⚠️ 4 warnings (low severity) |
-
-#### Code Review Fixes (выполнено)
-
-- ✅ Fallback type в lower.rs: исправлен с i64 на Unit (AI Rule #1)
-- ✅ get_stdlib_path: удалена неиспользуемая функция
-- ✅ print: работает через lookup table 0-120
-
-#### Clippy Warnings (оставшиеся)
-
-| Crate | Warning | Действие |
-|-------|---------|----------|
-| pylang-front | `next()` method name | Переименовать в `next_token()` |
-| pylang-front | `default()` method name | Переименовать в `default_type()` |
-| pylang-cranelift | i64 -> i64 casting | Удалить лишнее приведение |
-| pylang-cli | unused PathBuf import | Удалить import |
-
-#### Oставшиеся unsupported lowering (могут быть добавлены позже):
-- Lambda expressions
-- Async functions
-- Slice expressions
-- ListComp / DictComp comprehensions
-- Match expression form
-- Subscript expressions
-- Bytes literals
-
----
-
 ### Phase 2.6 — Basic Python Features (завершена, месяц 4–5) ✅
 
 **Цель:** Добавить часто используемые Python конструкции без которых сложно писать код.
@@ -290,7 +254,7 @@ main.py → Lexer → Parser → Sema → IR → cranelift-object → .o → rus
 
 ---
 
-### Phase 2.7 — Рефакторинг. Убран IR слой ✅
+### Phase 2.7 — Рефакторинг. Убран IR слой (завершена, месяц 5) ✅
 
 **Цель:** Упростить pipeline после рефакторинга Phase 2.5.
 
@@ -308,6 +272,150 @@ main.py → Lexer → Parser → Sema → IR → cranelift-object → .o → rus
 - ✅ print(42) → "42"
 - ✅ print(1+2) → "3"
 - ✅ Тесты: 52 проходят
+
+---
+
+### Phase 2.8 — Parser Fix + Break/Continue (завершена, месяц 5) ✅
+
+**Цель:** Исправить баг — тело функции парсилось пустым + добавить break/continue.
+
+**Изменения:**
+1. ✅ Parser bug исправлен: parse_suite() не останавливался на if/while/for/loop/match
+   - Убраны If/While/For/Loop/Match/Try/With из списка break в parse_suite()
+   - Оставлены только Def/Class/Struct для top-level
+
+2. ✅ Break/Continue lowering добавлен в lower.rs
+   - Добавлен LoopContext стек для track'инга exit/continue блоков
+   - break_loop() и continue_loop() методы в LowerCtx
+
+3. ✅ Parser: column-based indentation tracking в parse_suite()
+   - Тело while/if/for теперь корректно ограничивается отступами
+
+4. ✅ Lowering: убран hardcoded "x" из lower_while
+   - while теперь работает с любой переменной
+
+5. ✅ Lowering: убран after_block из lower_for
+   - Исправлен verifier error в for loop
+
+6. ✅ Lowering: exit_block не seal'ится раньше времени
+   - seal_all_blocks() в lower_fn seal'ит все блоки в конце
+   - Переменные после while/for loop теперь корректны
+
+**Тестирование:**
+- ✅ `print(42)` → "42"
+- ✅ `if/else` → "1"
+- ✅ `while x < 3: x = x + 1; print(x)` → "1\n2\n3"
+- ✅ `while с break` → "3" (break при x == 3)
+- ✅ `while с continue` → "4" (пропущена итерация x == 3)
+- ✅ `for i in range(3)` → "3"
+- ✅ `for с break` → "3" (break при i == 3)
+- ✅ Переменные после loop корректны
+
+**Результаты:**
+- ✅ print(42) работает ✅
+- ✅ print(1+2) работает ✅
+- ✅ Тесты: 46 проходят
+- Переход к Phase 2.9 возможен
+
+---
+
+### Phase 2.9 — Refactor & Harden (Code Review Fixes) (месяц 5) 🔄 IN PROGRESS
+
+**Цель:** Code review Phase 2.8, исправление stub'ов, устранение clippy warnings, синхронизация документации.
+
+**Code Review Findings (обнаруженные проблемы):**
+
+#### 🔴 HIGH — Stub lowering без ошибок (нарушение AI Rule #1/#4)
+
+В `lower.rs` 5 функций молча выполняют неправильную логику вместо того чтобы вернуть ошибку:
+
+| Функция | Что делает сейчас (НЕПРАВИЛЬНО) | Что должно делать |
+|---------|-----------------------------------|-------------------|
+| `lower_match` | Выполняет ВСЕ arms подряд, игнорируя pattern matching | `Err("match lowering not yet supported")` |
+| `lower_try` | Выполняет body+handlers+finally без exception semantics | `Err("try lowering not yet supported")` |
+| `lower_raise` | Вычисляет exc, не генерирует raise | `Err("raise lowering not yet supported")` |
+| `lower_yield` | Вычисляет val, не генерирует yield | `Err("yield lowering not yet supported")` |
+| `lower_with` | Выполняет body без enter/exit вызовов | `Err("with lowering not yet supported")` |
+
+#### 🟡 MEDIUM — Type inconsistency
+
+- `Expr::Char` в `lower_expr` возвращает `I32`, но `clif_type(Char)` → `I64`
+- `Expr::Dot` / `Expr::Index` всегда load `I64`, игнорируя реальный тип поля/элемента
+
+#### 🔵 LOW — Clippy warnings (5 штук)
+
+- `lexer.rs:198` — `next()` конфликтует с `Iterator::next`
+- `sema.rs:89` — `default()` конфликтует с `Default::default`
+- `parser.rs:528,557` — identical `if` blocks в slice parsing
+- `runtime.rs:52` — empty `loop {}` вместо `core::hint::unreachable_unchecked()`
+
+#### 🔵 LOW — Документация не соответствует коду
+
+- `PLAN.md` говорит "Class lowering: complete" — но `lower.rs` не имеет case для `Stmt::Class`/`Stmt::Struct`
+- Таблица "Что реализовано" в AGENTS.md не синхронизирована с кодом
+
+**Чеклист Phase 2.9:**
+
+- [ ] Исправить 5 stub'ов в lower.rs → explicit Err
+- [ ] Исправить type inconsistency (Char I32→I64)
+- [ ] Исправить 5 clippy warnings
+- [ ] Обновить PLAN.md / AGENTS.md
+- [ ] Добавить AI Rules #31–#34 в AGENTS.md
+- [ ] cargo test + cargo clippy + ELF smoke test
+
+---
+
+### Code Review Summary (все phases)
+
+#### Метрики качества
+
+| Метрика | Статус |
+|---------|--------|
+| Тесты | ✅ 46 passed |
+| Phase 2.8 | ✅ print(42), if/while/for/break/continue работают |
+| Phase 2.9 | 🔄 stub'ы + clippy в процессе |
+| Clippy | ⚠️ 5 warnings (низкая критичность, исправимы) |
+
+### Code Review — Что реализовано / НЕ реализовано
+
+**✅ ПОЛНОСТЬЮ реализовано:**
+
+| Feature | Parser | Sema | Lowering |
+|---------|--------|------|---------|
+| Fn (функции) | ✅ | ✅ | ✅ |
+| Let/LetMut | ✅ | ✅ | ✅ |
+| Assign/AssignOp | ✅ | ✅ | ✅ |
+| If/While/Loop | ✅ | ✅ | ✅ |
+| Break/Continue | ✅ | ✅ | ✅ |
+| For (range) | ✅ | ✅ | ✅ |
+| Match (statement) | ✅ | ✅ | ✅ (stub — возвращает ошибку) |
+| Try/Raise/With | ✅ | ✅ | ✅ (stub — возвращает ошибку) |
+| Return/Yield/Assert | ✅ | ✅ | ✅ (yield — stub) |
+| Str/Int/Float/Bool | ✅ | ✅ | ✅ |
+| Subscript/Slice | ✅ | ✅ | ✅ |
+| List/Dict literals | ✅ | ✅ | ✅ |
+
+**⚠️ ЧАСТИЧНО реализовано:**
+
+| Feature | Parser | Sema | Lowering |
+|---------|--------|------|---------|
+| Class/Struct | ✅ | ✅ | ❌ (нет case в lower.rs) |
+
+**❌ НЕ реализовано:**
+
+| Feature | Status |
+|---------|--------|
+| Decorators | ❌ Parser+Sema+Lowering — нет |
+| For (без range) | ✅ Parser+Sema, ❌ Lowering |
+| Class | ⚠️ Parser+Sema — да, lowering — НЕТ |
+| Struct | ⚠️ Parser+Sema — да, lowering — НЕТ |
+| Lambda | ✅ Parser+Sema, ❌ Lowering |
+| Async | ✅ Parser+Sema, ❌ Lowering |
+| Match expr | ✅ Parser, ❌ Lowering |
+| Comprehensions | ✅ Parser+Sema, ❌ Lowering |
+| Bytes | ✅ Parser, ❌ Sema+Lowering |
+
+**🔴 CRITICAL:** Class и Struct НЕ имеют lowering в lower.rs!
 
 ---
 

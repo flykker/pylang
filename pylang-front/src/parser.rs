@@ -33,7 +33,7 @@ pub enum ParseError {
 impl<'src> Parser<'src> {
     pub fn new(source: &'src str) -> Self {
         let mut lexer = Lexer::new(source);
-        let current = lexer.next();
+        let current = lexer.next_token();
         Self {
             lexer,
             ast: Vec::new(),
@@ -68,7 +68,7 @@ impl<'src> Parser<'src> {
 
     fn bump(&mut self) -> Option<Spanned<TokenKind>> {
         let prev = self.current.clone();
-        self.current = self.lexer.next();
+        self.current = self.lexer.next_token();
         prev
     }
 
@@ -267,6 +267,19 @@ impl<'src> Parser<'src> {
     fn parse_suite(&mut self) -> Result<Vec<Stmt>, ParseError> {
         let mut stmts = Vec::new();
         
+        // Skip leading newlines to determine base column (indentation level)
+        let base_col = loop {
+            if let Some(ref t) = self.current {
+                if t.value == TokenKind::Newline {
+                    self.bump();
+                    continue;
+                }
+                break t.span.start.col;
+            } else {
+                return Ok(stmts);
+            }
+        };
+        
         while let Some(ref t) = self.current {
             match &t.value {
                 TokenKind::Eof => break,
@@ -275,13 +288,13 @@ impl<'src> Parser<'src> {
                     self.bump();
                     continue;
                 }
-                TokenKind::Return => {
-                    stmts.push(self.parse_stmt()?);
-                }
-                TokenKind::Let => {
-                    stmts.push(self.parse_stmt()?);
-                }
                 _ => {
+                    let col = t.span.start.col;
+                    // Stop when we see a token at a lower column than the base
+                    // indentation of this block
+                    if col < base_col {
+                        break;
+                    }
                     if let Ok(stmt) = self.parse_stmt() {
                         stmts.push(stmt);
                     } else {
@@ -512,13 +525,11 @@ impl<'src> Parser<'src> {
                 } else if self.at(&TokenKind::Colon) {
                     // Slice без start: obj[:end] или obj[:]
                     self.bump();
-                    let end = if self.at(&TokenKind::RBracket) {
+                    let end = if self.at(&TokenKind::RBracket) || self.at(&TokenKind::Colon) {
                         None
-                    } else if self.at(&TokenKind::Colon) {
-                        None
-                        } else {
-                            Some(Box::new(self.parse_expr()?))
-                        };
+                    } else {
+                        Some(Box::new(self.parse_expr()?))
+                    };
                     let step = if self.at(&TokenKind::Colon) {
                         self.bump();
                         if self.at(&TokenKind::RBracket) {
@@ -541,9 +552,7 @@ impl<'src> Parser<'src> {
                     if self.at(&TokenKind::Colon) {
                         // Slice: obj[start:end] или obj[start:end:step]
                         self.bump();
-                        let end = if self.at(&TokenKind::RBracket) {
-                            None
-                        } else if self.at(&TokenKind::Colon) {
+                        let end = if self.at(&TokenKind::RBracket) || self.at(&TokenKind::Colon) {
                             None
                         } else {
                             Some(Box::new(self.parse_expr()?))
@@ -950,10 +959,16 @@ impl<'src> Parser<'src> {
         let expr = self.parse_expr()?;
         self.expect(TokenKind::Colon)?;
         self.skip_newline()?;
-        self.expect(TokenKind::Indent)?;
         
         let mut arms = Vec::new();
-        while !self.at(&TokenKind::Dedent) && !self.at(&TokenKind::Eof) {
+        while let Some(ref t) = self.current {
+            if t.value == TokenKind::Eof {
+                break;
+            }
+            if t.value == TokenKind::Newline {
+                self.bump();
+                continue;
+            }
             let pat = self.parse_pattern()?;
             
             let guard = if self.at(&TokenKind::If) {
@@ -970,8 +985,6 @@ impl<'src> Parser<'src> {
             
             arms.push(MatchArm { pat, guard, body });
         }
-        
-        self.expect(TokenKind::Dedent)?;
         
         Ok(Stmt::Match(Match { expr, arms }))
     }

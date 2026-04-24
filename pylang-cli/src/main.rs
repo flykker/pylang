@@ -53,7 +53,7 @@ fn main() -> Result<()> {
                     }
                     "tokens" => {
                         let mut lexer = Lexer::new(&source);
-                        while let Some(tok) = lexer.next() {
+                        while let Some(tok) = lexer.next_token() {
                             println!("{:?}", tok);
                         }
                     }
