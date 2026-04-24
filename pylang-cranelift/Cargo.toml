@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-pylang-ir = { path = "../pylang-ir" }
 pylang-front = { path = "../pylang-front" }
 pylang-runtime = { path = "../pylang-runtime" }
 cranelift = "0.131"

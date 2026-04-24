@@ -2,7 +2,7 @@
 //!
 //! Recursive descent. Парсит type-annotated Python subset.
 
-use crate::ast::{Class, *};
+use crate::ast::{Class, CompGen, *};
 use crate::lexer::{Lexer, Pos, Span, Spanned, TokenKind};
 use crate::sema::Sema;
 
@@ -137,7 +137,13 @@ impl<'src> Parser<'src> {
             TokenKind::Except | TokenKind::Finally | TokenKind::Eof => Err(ParseError::InvalidSyntax { span: token.span }),
             _ => {
                 let expr = self.parse_expr()?;
-                Ok(Stmt::Expr(expr))
+                if self.at(&TokenKind::Eq) && matches!(&expr, Expr::Ident(_)) {
+                    self.bump();
+                    let val = self.parse_expr()?;
+                    Ok(Stmt::Assign(Assign { target: Box::new(expr), val }))
+                } else {
+                    Ok(Stmt::Expr(expr))
+                }
             }
         }
     }
@@ -501,9 +507,72 @@ impl<'src> Parser<'src> {
                 expr = Expr::Dot { obj: Box::new(expr), name };
             } else if self.at(&TokenKind::LBracket) {
                 self.bump();
-                let idx = self.parse_expr()?;
-                self.expect(TokenKind::RBracket)?;
-                expr = Expr::Index { obj: Box::new(expr), idx: Box::new(idx) };
+                // Проверяем slice: obj[start:end] или obj[start:end:step]
+                if self.at(&TokenKind::RBracket) {
+                    self.bump();
+                    expr = Expr::Index { obj: Box::new(expr), idx: Box::new(Expr::None) };
+                } else if self.at(&TokenKind::Colon) {
+                    // Slice без start: obj[:end] или obj[:]
+                    self.bump();
+                    let end = if self.at(&TokenKind::RBracket) {
+                        None
+                    } else if self.at(&TokenKind::Colon) {
+                        None
+                        } else {
+                            Some(Box::new(self.parse_expr()?))
+                        };
+                    let step = if self.at(&TokenKind::Colon) {
+                        self.bump();
+                        if self.at(&TokenKind::RBracket) {
+                            None
+                        } else {
+                            Some(Box::new(self.parse_expr()?))
+                        }
+                    } else {
+                        None
+                    };
+                    self.expect(TokenKind::RBracket)?;
+                    expr = Expr::Slice {
+                        obj: Box::new(expr),
+                        start: None,
+                        end,
+                        step,
+                    };
+                } else {
+                    let first = self.parse_expr()?;
+                    if self.at(&TokenKind::Colon) {
+                        // Slice: obj[start:end] или obj[start:end:step]
+                        self.bump();
+                        let end = if self.at(&TokenKind::RBracket) {
+                            None
+                        } else if self.at(&TokenKind::Colon) {
+                            None
+                        } else {
+                            Some(Box::new(self.parse_expr()?))
+                        };
+                        let step = if self.at(&TokenKind::Colon) {
+                            self.bump();
+                            if self.at(&TokenKind::RBracket) {
+                                None
+                            } else {
+                                Some(Box::new(self.parse_expr()?))
+                            }
+                        } else {
+                            None
+                        };
+                        self.expect(TokenKind::RBracket)?;
+                        expr = Expr::Slice {
+                            obj: Box::new(expr),
+                            start: Some(Box::new(first)),
+                            end,
+                            step,
+                        };
+                    } else {
+                        // Index: obj[idx]
+                        self.expect(TokenKind::RBracket)?;
+                        expr = Expr::Index { obj: Box::new(expr), idx: Box::new(first) };
+                    }
+                }
             } else {
                 break;
             }
@@ -567,11 +636,53 @@ impl<'src> Parser<'src> {
                     self.bump();
                     return Ok(Expr::List(Vec::new()));
                 }
-                let mut elems = Vec::new();
-                while !self.at(&TokenKind::RBracket) {
-                    if !elems.is_empty() {
-                        self.expect(TokenKind::Comma)?;
+                let first = self.parse_expr()?;
+                // Проверяем list comprehension: [body for target in iter]
+                if self.at(&TokenKind::For) {
+                    self.bump();
+                    let target_tok = self.expect(TokenKind::Ident(String::new()))?;
+                    let target = match &target_tok.value {
+                        TokenKind::Ident(s) => s.clone(),
+                        _ => return Err(ParseError::ExpectedIdent { found: target_tok.value.clone(), span: target_tok.span }),
+                    };
+                    self.expect(TokenKind::In)?;
+                    let iter = self.parse_expr()?;
+                    let cond = if self.at(&TokenKind::If) {
+                        self.bump();
+                        Some(self.parse_expr()?)
+                    } else {
+                        None
+                    };
+                    let mut generators = vec![CompGen { target, iter, cond }];
+                    // Дополнительные for-генераторы
+                    while self.at(&TokenKind::For) {
+                        self.bump();
+                        let t2 = self.expect(TokenKind::Ident(String::new()))?;
+                        let target2 = match &t2.value {
+                            TokenKind::Ident(s) => s.clone(),
+                            _ => return Err(ParseError::ExpectedIdent { found: t2.value.clone(), span: t2.span }),
+                        };
+                        self.expect(TokenKind::In)?;
+                        let iter2 = self.parse_expr()?;
+                        let cond2 = if self.at(&TokenKind::If) {
+                            self.bump();
+                            Some(self.parse_expr()?)
+                        } else {
+                            None
+                        };
+                        generators.push(CompGen { target: target2, iter: iter2, cond: cond2 });
                     }
+                    self.expect(TokenKind::RBracket)?;
+                    return Ok(Expr::ListComp {
+                        body: Box::new(first),
+                        generators,
+                    });
+                }
+                // Обычный list literal
+                let mut elems = vec![first];
+                while self.at(&TokenKind::Comma) {
+                    self.bump();
+                    if self.at(&TokenKind::RBracket) { break; }
                     elems.push(self.parse_expr()?);
                 }
                 self.expect(TokenKind::RBracket)?;
@@ -583,11 +694,55 @@ impl<'src> Parser<'src> {
                     self.bump();
                     return Ok(Expr::Dict(Vec::new()));
                 }
-                let mut items = Vec::new();
-                while !self.at(&TokenKind::RBrace) {
-                    if !items.is_empty() {
-                        self.expect(TokenKind::Comma)?;
+                let first_key = self.parse_expr()?;
+                self.expect(TokenKind::Colon)?;
+                let first_val = self.parse_expr()?;
+                // Проверяем dict comprehension: {key: val for target in iter}
+                if self.at(&TokenKind::For) {
+                    self.bump();
+                    let target_tok = self.expect(TokenKind::Ident(String::new()))?;
+                    let target = match &target_tok.value {
+                        TokenKind::Ident(s) => s.clone(),
+                        _ => return Err(ParseError::ExpectedIdent { found: target_tok.value.clone(), span: target_tok.span }),
+                    };
+                    self.expect(TokenKind::In)?;
+                    let iter = self.parse_expr()?;
+                    let cond = if self.at(&TokenKind::If) {
+                        self.bump();
+                        Some(self.parse_expr()?)
+                    } else {
+                        None
+                    };
+                    let mut generators = vec![CompGen { target, iter, cond }];
+                    while self.at(&TokenKind::For) {
+                        self.bump();
+                        let t2 = self.expect(TokenKind::Ident(String::new()))?;
+                        let target2 = match &t2.value {
+                            TokenKind::Ident(s) => s.clone(),
+                            _ => return Err(ParseError::ExpectedIdent { found: t2.value.clone(), span: t2.span }),
+                        };
+                        self.expect(TokenKind::In)?;
+                        let iter2 = self.parse_expr()?;
+                        let cond2 = if self.at(&TokenKind::If) {
+                            self.bump();
+                            Some(self.parse_expr()?)
+                        } else {
+                            None
+                        };
+                        generators.push(CompGen { target: target2, iter: iter2, cond: cond2 });
                     }
+                    self.expect(TokenKind::RBrace)?;
+                    return Ok(Expr::DictComp {
+                        key: Box::new(first_key),
+                        val: Box::new(first_val),
+                        generators,
+                    });
+                }
+                // Обычный dict literal
+                let mut items = vec![(first_key, first_val)];
+                while self.at(&TokenKind::Comma) {
+                    self.bump();
+                    if self.at(&TokenKind::RBrace) { break; }
                     let key = self.parse_expr()?;
                     self.expect(TokenKind::Colon)?;
                     let val = self.parse_expr()?;
@@ -612,7 +767,7 @@ impl<'src> Parser<'src> {
             }),
         }
 }
-    
+        
     fn parse_lambda(&mut self) -> Result<Expr, ParseError> {
         self.bump();
         
@@ -1108,5 +1263,86 @@ mod tests {
         let mut sema = Sema::new();
         let result = parser.parse(&mut sema);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_list_literal() {
+        let code = "let x: int = [1, 2, 3]";
+        let mut parser = Parser::new(code);
+        let mut sema = Sema::new();
+        let result = parser.parse(&mut sema);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_dict_literal() {
+        let code = "let x: int = {1: 2, 3: 4}";
+        let mut parser = Parser::new(code);
+        let mut sema = Sema::new();
+        let result = parser.parse(&mut sema);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_listcomp() {
+        let code = "let x: int = [i for i in items]";
+        let mut parser = Parser::new(code);
+        let mut sema = Sema::new();
+        let result = parser.parse(&mut sema);
+        assert!(result.is_ok(), "ListComp parse failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_listcomp_with_cond() {
+        let code = "let x: int = [i for i in items if i > 0]";
+        let mut parser = Parser::new(code);
+        let mut sema = Sema::new();
+        let result = parser.parse(&mut sema);
+        assert!(result.is_ok(), "ListComp with cond parse failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_dictcomp() {
+        let code = "let x: int = {i: i * 2 for i in items}";
+        let mut parser = Parser::new(code);
+        let mut sema = Sema::new();
+        let result = parser.parse(&mut sema);
+        assert!(result.is_ok(), "DictComp parse failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_slice() {
+        let code = "let x: int = arr[1:3]";
+        let mut parser = Parser::new(code);
+        let mut sema = Sema::new();
+        let result = parser.parse(&mut sema);
+        assert!(result.is_ok(), "Slice parse failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_slice_full() {
+        let code = "let x: int = arr[0:10:2]";
+        let mut parser = Parser::new(code);
+        let mut sema = Sema::new();
+        let result = parser.parse(&mut sema);
+        assert!(result.is_ok(), "Slice full parse failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_index() {
+        let code = "let x: int = arr[0]";
+        let mut parser = Parser::new(code);
+        let mut sema = Sema::new();
+        let result = parser.parse(&mut sema);
+        assert!(result.is_ok(), "Index parse failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_assignment() {
+        let code = "x = 42";
+        let mut parser = Parser::new(code);
+        let mut sema = Sema::new();
+        let result = parser.parse(&mut sema);
+        assert!(result.is_ok(), "Assignment parse failed: {:?}", result.err());
     }
 }

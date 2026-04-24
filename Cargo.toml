@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "pylang-cli",
     "pylang-front",
-    "pylang-ir",
     "pylang-cranelift",
     "pylang-runtime",
     "pylang-std",

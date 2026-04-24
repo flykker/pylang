@@ -83,7 +83,7 @@ pub struct LetMut {
 
 #[derive(Clone, Debug)]
 pub struct Assign {
-    pub target: Expr,
+    pub target: Box<Expr>,
     pub val: Expr,
 }
 

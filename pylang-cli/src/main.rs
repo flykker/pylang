@@ -5,7 +5,6 @@ use pylang_front::parser::Parser as PylangParser;
 use pylang_front::sema::Sema;
 use pylang_cranelift::Compiler;
 use std::process;
-use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -59,21 +58,7 @@ fn main() -> Result<()> {
                         }
                     }
                     "ir" => {
-                        let compiler = Compiler::new();
-                        match compiler.compile(&ast) {
-                            Ok(functions) => {
-                                for func in &functions {
-                                    println!("Function: {:?}", func.name);
-                                    for inst in &func.body {
-                                        println!("  {:?}", inst);
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("IR lowering error: {}", e);
-                                process::exit(1);
-                            }
-                        }
+                        println!("IR output temporarily disabled — use ELF generation instead");
                     }
                     _ => {
                         eprintln!("Unknown emit option: {}", emit);

@@ -1,6 +1,5 @@
 def main():
-    let x = 10
-    if x > 5:
+    if 1 > 0:
         print(1)
     else:
         print(0)

@@ -22,23 +22,14 @@ Source (.py)
 [Semantic Analyzer] → Typed AST
     │  • Разрешение имён
     │  • Вывод типов / проверка (Hindley-Milner)
-    │  • Разрешение trait-ов
     ▼
-[Pylang IR] (SSA)
-    │  • 15–20 core ops
-    │  • Basic blocks, phi-nodes
-    ▼
-[Optimizer passes]
-    │  • Constant folding
-    │  • Dead code elimination
-    │  • Loop invariant motion
-    │  • Escape analysis
-    ▼
-[Cranelift IR]
-    │  • Понижение из Pylang IR
-    │  • Кастомные опкоды для threading
+[Cranelift IR] (прямое понижение из AST)
+    │  • Понижение AST → CLIF в lower.rs
     ▼
 [Code Generator] → Нативный бинарь
+    │  • cranelift-object → .o
+    │  • rustc runtime.o
+    │  • ld → ELF
 ```
 
 ---
@@ -176,19 +167,10 @@ pylang/
 │   ├── parser/peg/
 │   ├── ast/
 │   └── sema/           # name res, type inference
-├── pylang-ir/           # SSA IR definitions + passes
-│   ├── ops/            # core ops (Alloc, Lock, Spawn...)
-│   ├── passes/         # optimization passes
-│   └── validate/
 ├── pylang-cranelift/    # lowering to Cranelift
-│   ├── lower/          # IR → CLIF
-│   ├── custom_ops/     # ISLE rules для Lock/Spawn
-│   └── codegen/       # Cranelift codegen wrapper
-├── pylang-runtime/     # minimal runtime
-│   ├── alloc/         # arena + heap
-│   ├── obj/          # object model + Rc
-│   ├── thread/       # task, executor
-│   └── chan/         # channels
+│   ├── lower/          # AST → CLIF
+│   └── emit.rs        # ELF generation
+├── pylang-runtime/     # minimal runtime (чистый Rust, syscall)
 └── pylang-std/        # stdlib written in Pylang
 ```
 
@@ -274,7 +256,7 @@ main.py → Lexer → Parser → Sema → IR → cranelift-object → .o → rus
 | pylang-cranelift | i64 -> i64 casting | Удалить лишнее приведение |
 | pylang-cli | unused PathBuf import | Удалить import |
 
-#### Oставшиесяunsupported lowering (могут быть добавлены позже):
+#### Oставшиеся unsupported lowering (могут быть добавлены позже):
 - Lambda expressions
 - Async functions
 - Slice expressions
@@ -282,19 +264,59 @@ main.py → Lexer → Parser → Sema → IR → cranelift-object → .o → rus
 - Match expression form
 - Subscript expressions
 - Bytes literals
-- `x = 1 + 2` синтаксис (без `let`)
 
 ---
 
-### Phase 3 — Performance (месяц 4–6)
+### Phase 2.6 — Basic Python Features (завершена, месяц 4–5) ✅
+
+**Цель:** Добавить часто используемые Python конструкции без которых сложно писать код.
+
+**Фичи:**
+- ✅ Simple assignment: `x = 1` (без let)
+- ✅ Subscript: `list[i]`, `dict[key]`
+- ✅ List/Dict literals: `[1,2]`, `{a:1}`
+- ✅ List comprehension: `[x for x in items]`
+- ✅ Dict comprehension: `{k: v for ...}`
+- ✅ Slice: `list[1:3]`, `list[::2]`
+
+**Реализация:**
+- ✅ Parser: slice `obj[1:3]`, `obj[::2]` — поддержка `:` в subscript
+- ✅ Parser: list comprehension `[x for x in items if cond]`
+- ✅ Parser: dict comprehension `{k: v for k in items}`
+- ✅ IR: добавлены Inst::Slice, Inst::ListComp, Inst::DictComp, CompGen
+- ✅ Lowering: Slice, ListComp, DictComp — генерация IR
+- ✅ Sema: type checking для всех конструкций (уже был)
+- ✅ Тесты: parser + lowering
+
+---
+
+### Phase 2.7 — Рефакторинг. Убран IR слой ✅
+
+**Цель:** Упростить pipeline после рефакторинга Phase 2.5.
+
+**Изменения:**
+- ✅ Убран pylang-ir из зависимостей pylang-cranelift
+- ✅ Удалён codegen.rs (мертвый код)
+- ✅ Pipeline: AST → CLIF → ld → ELF
+
+**Исправления:**
+- ✅ Segfault при print(42): SSE alignment в runtime
+  - Переписал print_int с write_volatile вместо movaps
+- ✅ Порядок seal_block в lower_if (seal после jumps)
+
+**Результаты тестирования:**
+- ✅ print(42) → "42"
+- ✅ print(1+2) → "3"
+- ✅ Тесты: 52 проходят
+
+---
+
+### Phase 3 — Performance (отложена, месяц 4–6)
 
 **Oставшиеся unsupported lowering (могут быть добавлены позже):**
 - Lambda expressions
 - Async functions  
-- Slice expressions
-- ListComp / DictComp comprehensions
 - Match expression form
-- Subscript expressions
 - Bytes literals
 
 **Планируемые оптимизации:**
@@ -302,6 +324,8 @@ main.py → Lexer → Parser → Sema → IR → cranelift-object → .o → rus
 - Coroutine lowering
 - Custom Lock/Spawn ISLE rules
 - Allocation hoisting, auto-free passes
+
+**Причина:** Phase 3 отложена т.к. базовые Python фичи не работают.
 
 ### Phase 4 — Concurrency (месяц 6–8)
 

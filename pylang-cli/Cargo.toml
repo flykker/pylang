@@ -9,7 +9,6 @@ path = "src/main.rs"
 
 [dependencies]
 pylang-front = { path = "../pylang-front" }
-pylang-ir = { path = "../pylang-ir" }
 pylang-cranelift = { path = "../pylang-cranelift" }
 pylang-runtime = { path = "../pylang-runtime" }
 

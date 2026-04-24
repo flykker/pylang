@@ -442,7 +442,6 @@ dependencies = [
  "clap",
  "pylang-cranelift",
  "pylang-front",
- "pylang-ir",
  "pylang-runtime",
 ]
 
@@ -457,19 +456,11 @@ dependencies = [
  "cranelift-native",
  "cranelift-object",
  "pylang-front",
- "pylang-ir",
  "pylang-runtime",
 ]
 
 [[package]]
 name = "pylang-front"
-version = "0.1.0"
-dependencies = [
- "pylang-ir",
-]
-
-[[package]]
-name = "pylang-ir"
 version = "0.1.0"
 
 [[package]]

@@ -436,9 +436,20 @@ impl Sema {
     }
 
     fn check_assign(&mut self, a: &Assign) -> Result<(), Vec<SemaError>> {
-        let _ = self.check_expr(&a.target)?;
-        let _ = self.check_expr(&a.val)?;
-        Ok(())
+        if let Expr::Ident(name) = &*a.target {
+            if self.lookup_name(name).is_some() {
+                let _ = self.check_expr(&a.val)?;
+                Ok(())
+            } else {
+                let val_ty = self.check_expr(&a.val)?;
+                self.define_name(name.clone(), val_ty, NameDef::Local);
+                Ok(())
+            }
+        } else {
+            let _ = self.check_expr(&a.target)?;
+            let _ = self.check_expr(&a.val)?;
+            Ok(())
+        }
     }
 
     fn check_assignop(&mut self, a: &AssignOp) -> Result<(), Vec<SemaError>> {
