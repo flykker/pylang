@@ -1,4 +1,5 @@
 def main():
-    let i = 0
-    while i < 3:
-        i = i + 1
+    x = 0
+    while x < 3:
+        print(x)
+        x = x + 1

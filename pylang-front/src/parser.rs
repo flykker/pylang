@@ -270,9 +270,7 @@ impl<'src> Parser<'src> {
         while let Some(ref t) = self.current {
             match &t.value {
                 TokenKind::Eof => break,
-                TokenKind::Def | TokenKind::Class | TokenKind::Struct | TokenKind::If 
-                | TokenKind::While | TokenKind::For | TokenKind::Loop | TokenKind::Match 
-                | TokenKind::Try | TokenKind::With | TokenKind::Except | TokenKind::Finally => break,
+                TokenKind::Def | TokenKind::Class | TokenKind::Struct => break,
                 TokenKind::Newline => {
                     self.bump();
                     continue;

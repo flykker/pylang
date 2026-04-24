@@ -65,6 +65,11 @@ Phase 2.7: ✅ Завершена
 - ✅ codegen.rs удалён
 - ✅ Pipeline: AST → CLIF → ld → ELF
 
+Phase 2.8: ✅ Завершена
+- ✅ Parser bug исправлен: parse_suite() не останавливался на if/while/for/loop/match
+  - Убраны If/While/For/Loop/Match/Try/With из списка break в parse_suite()
+  - Оставлены только Def/Class/Struct для top-level
+
 Причина: Phase 3 (Performance) отложена т.к. базовые Python фичи не работают.
 
 ## Первый шаг (выполнено)
