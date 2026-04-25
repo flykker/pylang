@@ -137,7 +137,7 @@ impl<'src> Parser<'src> {
             TokenKind::Except | TokenKind::Finally | TokenKind::Eof => Err(ParseError::InvalidSyntax { span: token.span }),
             _ => {
                 let expr = self.parse_expr()?;
-                if self.at(&TokenKind::Eq) && matches!(&expr, Expr::Ident(_)) {
+                if self.at(&TokenKind::Eq) && (matches!(&expr, Expr::Ident(_)) || matches!(&expr, Expr::Dot { .. })) {
                     self.bump();
                     let val = self.parse_expr()?;
                     Ok(Stmt::Assign(Assign { target: Box::new(expr), val }))
@@ -192,8 +192,12 @@ impl<'src> Parser<'src> {
             _ => return Err(ParseError::UnexpectedToken { expected: "parameter name", found: name_tok.value.clone(), span: name_tok.span }),
         };
         
-        self.expect(TokenKind::Colon)?;
-        let ty = self.parse_type()?;
+        let ty = if self.at(&TokenKind::Colon) {
+            self.bump();
+            self.parse_type()?
+        } else {
+            Type::Named("int".to_string())
+        };
         
         let default = if self.at(&TokenKind::Eq) {
             self.bump();
@@ -283,7 +287,7 @@ impl<'src> Parser<'src> {
         while let Some(ref t) = self.current {
             match &t.value {
                 TokenKind::Eof => break,
-                TokenKind::Def | TokenKind::Class | TokenKind::Struct => break,
+                TokenKind::Class | TokenKind::Struct => break,
                 TokenKind::Newline => {
                     self.bump();
                     continue;
@@ -515,7 +519,20 @@ impl<'src> Parser<'src> {
                     TokenKind::Ident(s) => s.clone(),
                     _ => String::new(),
                 };
-                expr = Expr::Dot { obj: Box::new(expr), name };
+                if self.at(&TokenKind::LParen) {
+                    self.bump();
+                    let mut args = Vec::new();
+                    while !self.at(&TokenKind::RParen) {
+                        if !args.is_empty() {
+                            self.expect(TokenKind::Comma)?;
+                        }
+                        args.push(self.parse_expr()?);
+                    }
+                    self.expect(TokenKind::RParen)?;
+                    expr = Expr::Method { obj: Box::new(expr), name, args };
+                } else {
+                    expr = Expr::Dot { obj: Box::new(expr), name };
+                }
             } else if self.at(&TokenKind::LBracket) {
                 self.bump();
                 // Проверяем slice: obj[start:end] или obj[start:end:step]

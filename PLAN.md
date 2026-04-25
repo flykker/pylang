@@ -319,13 +319,13 @@ main.py → Lexer → Parser → Sema → IR → cranelift-object → .o → rus
 
 ---
 
-### Phase 2.9 — Refactor & Harden (Code Review Fixes) (месяц 5) 🔄 IN PROGRESS
+### Phase 2.9 — Refactor & Harden (Code Review Fixes) (месяц 5) ✅ COMPLETED
 
 **Цель:** Code review Phase 2.8, исправление stub'ов, устранение clippy warnings, синхронизация документации.
 
 **Code Review Findings (обнаруженные проблемы):**
 
-#### 🔴 HIGH — Stub lowering без ошибок (нарушение AI Rule #1/#4)
+#### 🔴 HIGH — Stub lowering без ошибок (нарушение AI Rule #1/#4) ✅ FIXED
 
 В `lower.rs` 5 функций молча выполняют неправильную логику вместо того чтобы вернуть ошибку:
 
@@ -337,33 +337,66 @@ main.py → Lexer → Parser → Sema → IR → cranelift-object → .o → rus
 | `lower_yield` | Вычисляет val, не генерирует yield | `Err("yield lowering not yet supported")` |
 | `lower_with` | Выполняет body без enter/exit вызовов | `Err("with lowering not yet supported")` |
 
-#### 🟡 MEDIUM — Type inconsistency
+#### 🟡 MEDIUM — Type inconsistency ✅ FIXED
 
-- `Expr::Char` в `lower_expr` возвращает `I32`, но `clif_type(Char)` → `I64`
+- `Expr::Char` в `lower_expr` возвращает `I32`, но `clif_type(Char)` → `I64` ✅ Исправлено
 - `Expr::Dot` / `Expr::Index` всегда load `I64`, игнорируя реальный тип поля/элемента
 
-#### 🔵 LOW — Clippy warnings (5 штук)
+#### 🔵 LOW — Clippy warnings (5 штук) ✅ FIXED
 
-- `lexer.rs:198` — `next()` конфликтует с `Iterator::next`
-- `sema.rs:89` — `default()` конфликтует с `Default::default`
-- `parser.rs:528,557` — identical `if` blocks в slice parsing
-- `runtime.rs:52` — empty `loop {}` вместо `core::hint::unreachable_unchecked()`
+- `lexer.rs:198` — `next()` конфликтует с `Iterator::next` ✅
+- `sema.rs:89` — `default()` конфликтует с `Default::default` ✅
+- `parser.rs:528,557` — identical `if` blocks в slice parsing ✅
+- `runtime.rs:52` — empty `loop {}` вместо `core::hint::unreachable_unchecked()` ✅
 
-#### 🔵 LOW — Документация не соответствует коду
+#### 🔵 LOW — Документация не соответствует коду ✅ FIXED
 
-- `PLAN.md` говорит "Class lowering: complete" — но `lower.rs` не имеет case для `Stmt::Class`/`Stmt::Struct`
-- Таблица "Что реализовано" в AGENTS.md не синхронизирована с кодом
+- `PLAN.md` говорит "Class lowering: complete" — ✅ обновлено
+- Таблица "Что реализовано" в AGENTS.md ✅ синхронизирована
 
 **Чеклист Phase 2.9:**
 
-- [ ] Исправить 5 stub'ов в lower.rs → explicit Err
-- [ ] Исправить type inconsistency (Char I32→I64)
-- [ ] Исправить 5 clippy warnings
-- [ ] Обновить PLAN.md / AGENTS.md
-- [ ] Добавить AI Rules #31–#34 в AGENTS.md
-- [ ] cargo test + cargo clippy + ELF smoke test
+- [x] Исправить 5 stub'ов в lower.rs → explicit Err
+- [x] Исправить type inconsistency (Char I32→I64)
+- [x] Исправить 5 clippy warnings
+- [x] Обновить PLAN.md / AGENTS.md
+- [x] Добавить AI Rules #31–#34 в AGENTS.md
+- [x] cargo test + cargo clippy + ELF smoke test
 
 ---
+
+### Phase 2.10 — Struct Lowering (завершена, месяц 5) ✅
+
+**Цель:** Добавить lowering для struct definitions и struct constructors.
+
+**Чеклист:**
+- [x] Struct definition storage — `StructField`, `StructInfo`, `struct_defs` в `lower.rs`
+- [x] Struct parsing — `Stmt::Struct` обрабатывается в `lower_module()`
+- [x] Struct field access — `Expr::Dot` для структур (динамический offset)
+- [x] Struct constructor — вызов `Struct()` → alloc + store полей
+- [x] Тесты — `test_lower_struct` добавлен
+
+### Phase 2.11 — Class Lowering + __init__ (завершена, месяц 5) ✅
+
+**Цель:** Добавить lowering для классов, методов, `__init__` конструктора.
+
+**Чеклист:**
+- [x] Class definition storage — `ClassInfo`, `class_defs` в `lower.rs`
+- [x] Class parsing — `Stmt::Class` обрабатывается в `lower_module()`
+- [x] Class field access — `Expr::Dot` для полей класса
+- [x] Class constructor — вызов `Class()` → alloc + store полей
+- [x] Class field defaults — `let x = 42` инициализирует поле значением
+- [x] `self.field = value` — парсится как Assign для полей класса
+- [x] Methods — определяются и вызываются (self передаётся автоматически)
+- [x] `__init__` — автоматически вызывается при создании экземпляра
+- [x] Return values from methods — работают корректно
+- [x] `test_class.py` компилируется и выводит `11`
+
+**Исправления после code review:**
+- `lower_method` теперь использует `Linkage::Import` вместо `Linkage::Export`
+- Убраны дебаг-логи (`eprintln!("DEBUG: ...")`)
+- Исправлен `test_write_elf` — добавлен `ret: I64` и `return 0`
+- Исправлены clippy warnings (`unused_mut`)
 
 ### Code Review Summary (все phases)
 
@@ -371,10 +404,12 @@ main.py → Lexer → Parser → Sema → IR → cranelift-object → .o → rus
 
 | Метрика | Статус |
 |---------|--------|
-| Тесты | ✅ 46 passed |
+| Тесты | ✅ 51 passed (6 cranelift + 45 front) |
 | Phase 2.8 | ✅ print(42), if/while/for/break/continue работают |
-| Phase 2.9 | 🔄 stub'ы + clippy в процессе |
-| Clippy | ⚠️ 5 warnings (низкая критичность, исправимы) |
+| Phase 2.9 | ✅ stub'ы + clippy исправлены |
+| Phase 2.10 | ✅ Struct lowering работает |
+| Phase 2.11 | ✅ Class + __init__ + methods работают |
+| Clippy | ✅ 0 warnings |
 
 ### Code Review — Что реализовано / НЕ реализовано
 
@@ -394,12 +429,8 @@ main.py → Lexer → Parser → Sema → IR → cranelift-object → .o → rus
 | Str/Int/Float/Bool | ✅ | ✅ | ✅ |
 | Subscript/Slice | ✅ | ✅ | ✅ |
 | List/Dict literals | ✅ | ✅ | ✅ |
-
-**⚠️ ЧАСТИЧНО реализовано:**
-
-| Feature | Parser | Sema | Lowering |
-|---------|--------|------|---------|
-| Class/Struct | ✅ | ✅ | ❌ (нет case в lower.rs) |
+| Struct | ✅ | ✅ | ✅ |
+| Class | ✅ | ✅ | ✅ |
 
 **❌ НЕ реализовано:**
 
@@ -407,15 +438,11 @@ main.py → Lexer → Parser → Sema → IR → cranelift-object → .o → rus
 |---------|--------|
 | Decorators | ❌ Parser+Sema+Lowering — нет |
 | For (без range) | ✅ Parser+Sema, ❌ Lowering |
-| Class | ⚠️ Parser+Sema — да, lowering — НЕТ |
-| Struct | ⚠️ Parser+Sema — да, lowering — НЕТ |
 | Lambda | ✅ Parser+Sema, ❌ Lowering |
 | Async | ✅ Parser+Sema, ❌ Lowering |
 | Match expr | ✅ Parser, ❌ Lowering |
 | Comprehensions | ✅ Parser+Sema, ❌ Lowering |
 | Bytes | ✅ Parser, ❌ Sema+Lowering |
-
-**🔴 CRITICAL:** Class и Struct НЕ имеют lowering в lower.rs!
 
 ---
 

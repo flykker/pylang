@@ -7,7 +7,7 @@ use cranelift_module::{Module as ClifModule, Linkage};
 use cranelift_object::{ObjectModule, ObjectBuilder};
 use pylang_front::ast::Stmt;
 
-use crate::lower::{lower_module, lower_fn};
+use crate::lower::lower_module;
 
 pub fn write_simple_elf(output: &Path, ast: &[Stmt]) -> Result<(), String> {
     let runtime_o = compile_runtime_lib()?;
@@ -18,37 +18,33 @@ pub fn write_simple_elf(output: &Path, ast: &[Stmt]) -> Result<(), String> {
     lower_module(&mut module, ast)?;
     
     // Ensure main exists — if not, create an empty one
-    let has_main = ast.iter().any(|s| matches!(s, Stmt::Fn(f) if f.name == "main"));
-    if !has_main {
-        let empty_main = pylang_front::ast::Fn {
-            name: "main".to_string(),
-            params: vec![],
-            ret: None,
-            body: vec![],
-        };
-        lower_fn(&mut module, &empty_main)?;
-    }
+    let _main_fn = ast.iter().find(|s| matches!(s, Stmt::Fn(f) if f.name == "main"));
     
-    // Create _start that calls main then exit(0)
-    let void_sig = module.make_signature();
-    let main_id = module.declare_function("main", Linkage::Import, &void_sig)
+    // Create signature for main (returns i64, no params)
+    // The lower_fn already declared main with the correct signature
+    let mut main_sig = module.make_signature();
+    main_sig.returns.push(AbiParam::new(types::I64));
+    let main_id = module.declare_function("main", Linkage::Import, &main_sig)
         .map_err(|e| e.to_string())?;
     
-    let start_id = module.declare_function("_start", Linkage::Export, &void_sig)
+    // Create signature for _start (no returns - entry point)
+    let start_sig = module.make_signature();
+    let start_id = module.declare_function("_start", Linkage::Export, &start_sig)
         .map_err(|e| e.to_string())?;
     
     let mut ctx = module.make_context();
-    ctx.func.signature = void_sig.clone();
+    ctx.func.signature = start_sig.clone();
     ctx.func.name = UserFuncName::user(0, 0);
     
     let mut fn_ctx = FunctionBuilderContext::new();
     let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fn_ctx);
     let entry = builder.create_block();
-    builder.switch_to_block(entry);
     builder.seal_block(entry);
+    builder.switch_to_block(entry);
     
     let _dummy_slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 32, 16));
     
+    // Call main without parameters
     let callee_main = module.declare_func_in_func(main_id, builder.func);
     builder.ins().call(callee_main, &[]);
     
@@ -62,8 +58,12 @@ pub fn write_simple_elf(output: &Path, ast: &[Stmt]) -> Result<(), String> {
     builder.ins().return_(&[]);
     
     builder.finalize();
-    module.define_function(start_id, &mut ctx)
-        .map_err(|e| e.to_string())?;
+    match module.define_function(start_id, &mut ctx) {
+        Ok(()) => {}
+        Err(e) => {
+            return Err(e.to_string());
+        }
+    }
     
     // Emit object file
     let product = module.finish();
@@ -161,13 +161,19 @@ mod tests {
         let ast = vec![Stmt::Fn(pylang_front::ast::Fn {
             name: "main".to_string(),
             params: vec![],
-            ret: None,
-            body: vec![Stmt::Expr(Expr::Call {
-                func: Box::new(Expr::Ident("print".to_string())),
-                args: vec![Expr::Int(42)],
-            })],
+            ret: Some(pylang_front::ast::Type::I64),
+            body: vec![
+                Stmt::Expr(Expr::Call {
+                    func: Box::new(Expr::Ident("print".to_string())),
+                    args: vec![Expr::Int(42)],
+                }),
+                Stmt::Return(pylang_front::ast::Return { val: Some(Expr::Int(0)) }),
+            ],
         })];
         let result = write_simple_elf(output, &ast);
+        if let Err(ref e) = result {
+            eprintln!("test_write_elf error: {}", e);
+        }
         if result.is_ok() {
             let _ = std::fs::remove_file(output);
         }
