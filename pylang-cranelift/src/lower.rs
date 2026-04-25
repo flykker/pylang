@@ -79,9 +79,10 @@ impl<'a> LowerCtx<'a> {
     }
 }
 
-pub fn lower_module(module: &mut dyn Module, stmts: &[Stmt]) -> Result<(), String> {
+pub fn lower_module(module: &mut dyn Module, stmts: &[Stmt]) -> Result<HashMap<String, FuncId>, String> {
     let mut struct_defs: HashMap<String, StructInfo> = HashMap::new();
     let mut class_defs: HashMap<String, ClassInfo> = HashMap::new();
+    let mut func_ids: HashMap<String, FuncId> = HashMap::new();
 
     // First pass: collect all struct and class definitions (without methods)
     for stmt in stmts {
@@ -186,22 +187,24 @@ pub fn lower_module(module: &mut dyn Module, stmts: &[Stmt]) -> Result<(), Strin
                         };
                         
                         let method_fn = pylang_front::ast::Fn {
-                            name: method_name,
+                            name: method_name.clone(),
                             params,
                             ret: f.ret.clone(),
                             body: f.body.clone(),
                         };
-                        lower_fn(module, &method_fn, &struct_defs, &class_defs)?;
+                        let id = lower_fn(module, &method_fn, &struct_defs, &class_defs)?;
+                        func_ids.insert(method_name, id);
                     }
                 }
             }
             Stmt::Fn(f) => {
-                lower_fn(module, f, &struct_defs, &class_defs)?;
+                let id = lower_fn(module, f, &struct_defs, &class_defs)?;
+                func_ids.insert(f.name.clone(), id);
             }
             _ => {}
         }
     }
-    Ok(())
+    Ok(func_ids)
 }
 
 pub fn lower_fn(module: &mut dyn Module, f: &AstFn, struct_defs: &HashMap<String, StructInfo>, class_defs: &HashMap<String, ClassInfo>) -> Result<FuncId, String> {
@@ -213,7 +216,9 @@ pub fn lower_fn(module: &mut dyn Module, f: &AstFn, struct_defs: &HashMap<String
     let has_return_val = f.body.iter().any(|s| {
         matches!(s, Stmt::Return(r) if r.val.is_some())
     });
-    let ret_ty = if let Some(ref t) = f.ret {
+    let ret_ty = if f.name == "main" {
+        Some(types::I64)
+    } else if let Some(ref t) = f.ret {
         Some(clif_type(t)?)
     } else if has_return_val {
         Some(types::I64)
@@ -292,7 +297,7 @@ pub fn lower_fn(module: &mut dyn Module, f: &AstFn, struct_defs: &HashMap<String
 fn extract_int_from_expr(expr: &Expr) -> i64 {
     match expr {
         Expr::Int(n) => *n,
-        Expr::Bool(b) => if *b { 1 } else { 0 },
+        Expr::Bool(b) => *b as i64,
         _ => 0,
     }
 }
@@ -358,6 +363,22 @@ fn lower_stmt(stmt: &Stmt, lctx: &mut LowerCtx) -> Result<(), String> {
                 let addr = lctx.builder.ins().iadd(obj_val, offset_val);
                 lctx.builder.ins().store(MemFlags::trusted(), val, addr, 0);
                 Ok(())
+            } else if let Expr::Subscript(elems) = &*a.target {
+                if elems.len() == 2 {
+                    let obj = lower_expr(&elems[0], lctx)?;
+                    let index = lower_expr(&elems[1], lctx)?;
+                    let val = lower_expr(&a.val, lctx)?;
+                    let eight = lctx.builder.ins().iconst(types::I32, 8);
+                    let index_i32 = lctx.builder.ins().ireduce(types::I32, index);
+                    let index_times_8 = lctx.builder.ins().imul(eight, index_i32);
+                    let offset = lctx.builder.ins().iadd(eight, index_times_8);
+                    let offset_i64 = lctx.builder.ins().uextend(types::I64, offset);
+                    let addr = lctx.builder.ins().iadd(obj, offset_i64);
+                    lctx.builder.ins().store(MemFlags::trusted(), val, addr, 0);
+                    Ok(())
+                } else {
+                    Err("subscript assign requires 2 elements".to_string())
+                }
             } else {
                 Err("complex assignment not yet supported".to_string())
             }
@@ -474,11 +495,16 @@ fn lower_expr(expr: &Expr, lctx: &mut LowerCtx) -> Result<Value, String> {
             let vals: Vec<Value> = elems.iter()
                 .map(|e| lower_expr(e, lctx))
                 .collect::<Result<Vec<_>, _>>()?;
-            let size = elems.len() * 8;
-            let size_val = lctx.builder.ins().iconst(types::I64, size as i64);
+            let data_size = elems.len() * 8;
+            let total_size = data_size + 8; // +8 for len
+            let size_val = lctx.builder.ins().iconst(types::I64, total_size as i64);
             let ptr = call_runtime(lctx, "alloc", &[size_val], types::I64)?;
+            // store len at offset 0
+            let len_val = lctx.builder.ins().iconst(types::I64, elems.len() as i64);
+            lctx.builder.ins().store(MemFlags::trusted(), len_val, ptr, 0);
+            // store elements at offset 8, 16, ...
             for (i, val) in vals.iter().enumerate() {
-                let offset = lctx.builder.ins().iconst(types::I64, (i * 8) as i64);
+                let offset = lctx.builder.ins().iconst(types::I64, ((i + 1) * 8) as i64);
                 let addr = lctx.builder.ins().iadd(ptr, offset);
                 lctx.builder.ins().store(MemFlags::trusted(), *val, addr, 0);
             }
@@ -541,13 +567,19 @@ fn lower_expr(expr: &Expr, lctx: &mut LowerCtx) -> Result<Value, String> {
         }
         Expr::Match { .. } => Err("match expression not yet supported".to_string()),
         Expr::Subscript(elems) => {
-            let vals: Vec<Value> = elems.iter()
-                .map(|e| lower_expr(e, lctx))
-                .collect::<Result<Vec<_>, _>>()?;
-            if vals.is_empty() {
-                Ok(lctx.builder.ins().iconst(types::I64, 0))
+            if elems.len() == 2 {
+                let obj = lower_expr(&elems[0], lctx)?;
+                let index = lower_expr(&elems[1], lctx)?;
+                // assume list: len at 0, data at 8 + index*8
+                let eight = lctx.builder.ins().iconst(types::I32, 8);
+                let index_i32 = lctx.builder.ins().ireduce(types::I32, index);
+                let index_times_8 = lctx.builder.ins().imul(eight, index_i32);
+                let offset = lctx.builder.ins().iadd(eight, index_times_8);
+                let offset_i64 = lctx.builder.ins().uextend(types::I64, offset);
+                let addr = lctx.builder.ins().iadd(obj, offset_i64);
+                Ok(lctx.builder.ins().load(types::I64, MemFlags::trusted(), addr, 0))
             } else {
-                Ok(vals[0])
+                Err("subscript requires 2 elements".to_string())
             }
         }
         Expr::Bytes(_) => Err("bytes not yet supported".to_string()),
@@ -961,7 +993,65 @@ fn lower_for(f: &For, lctx: &mut LowerCtx) -> Result<(), String> {
         }
     }
 
-    Err("for loop only supports range() for now".to_string())
+    // treat as iterable (list for now)
+    let _list_val = lower_expr(&f.iter, lctx)?;
+    let len_expr = Expr::Call {
+        func: Box::new(Expr::Ident("len".to_string())),
+        args: vec![f.iter.clone()],
+    };
+    let end_val = lower_expr(&len_expr, lctx)?;
+
+    let header_block = lctx.create_block();
+    let body_block = lctx.create_block();
+    let exit_block = lctx.create_block();
+
+    let var = lctx.builder.declare_var(types::I64);
+    let zero = lctx.builder.ins().iconst(types::I64, 0);
+    lctx.builder.def_var(var, zero);
+    lctx.locals.insert("i".to_string(), var);  // for subscript
+
+    let target_var = lctx.builder.declare_var(types::I64);
+    lctx.locals.insert(f.target.clone(), target_var);
+
+    lctx.push_loop(exit_block, header_block);
+
+    lctx.builder.ins().jump(header_block, &[]);
+    lctx.block_filled = true;
+
+    lctx.switch_to_block(header_block);
+    let i = lctx.builder.use_var(var);
+    let cond = lctx.builder.ins().icmp(IntCC::SignedLessThan, i, end_val);
+    lctx.builder.ins().brif(cond, body_block, &[], exit_block, &[]);
+    lctx.block_filled = true;
+
+    lctx.switch_to_block(body_block);
+    // assign target = list[i]
+    let subscript_expr = Expr::Subscript(vec![f.iter.clone(), Expr::Ident("i".to_string())]);
+    let item_val = lower_expr(&subscript_expr, lctx)?;
+    lctx.builder.def_var(target_var, item_val);
+
+    // then lower body
+    for stmt in &f.body {
+        if lctx.block_filled { break; }
+        lower_stmt(stmt, lctx)?;
+    }
+    if !lctx.block_filled {
+        let i = lctx.builder.use_var(var);
+        let one = lctx.builder.ins().iconst(types::I64, 1);
+        let next = lctx.builder.ins().iadd(i, one);
+        lctx.builder.def_var(var, next);
+        lctx.builder.ins().jump(header_block, &[]);
+        lctx.block_filled = true;
+    }
+
+    lctx.builder.seal_block(header_block);
+    lctx.builder.seal_block(body_block);
+    // Do NOT seal exit_block here
+    lctx.pop_loop();
+
+    lctx.switch_to_block(exit_block);
+
+    Ok(())
 }
 
 fn lower_loop(l: &Loop, lctx: &mut LowerCtx) -> Result<(), String> {

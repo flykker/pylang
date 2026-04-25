@@ -131,6 +131,7 @@ Phase 2.11: ✅ Завершена
 | List/Dict literals | ✅ | ✅ | ✅ |
 | Break/Continue | ✅ | ✅ | ✅ |
 | For (range) | ✅ | ✅ | ✅ |
+| For (без range) | ✅ | ✅ | ✅ |
 | Struct | ✅ | ✅ | ✅ |
 | Class | ✅ | ✅ | ✅ |
 
@@ -139,7 +140,6 @@ Phase 2.11: ✅ Завершена
 | Feature | Status |
 |---------|--------|
 | Decorators | ❌ Parser+Sema+Lowering — нет |
-| For (без range) | ✅ Parser+Sema, ❌ Lowering |
 | Lambda | ✅ Parser+Sema, ❌ Lowering |
 | Async | ✅ Parser+Sema, ❌ Lowering |
 | Match expr | ✅ Parser, ❌ Lowering |
@@ -246,8 +246,7 @@ timeout 20s cargo test     # Use timeout to prevent hanging
 #### 🔴 HIGH PRIORITY
 
 1. **Lambda lowering** — `Expr::Lambda` в `lower_expr` возвращает ошибку
-2. **For (без range) lowering** — `for x in list:` не работает
-3. **Match expression lowering** — `Expr::Match` не поддерживается
+2. **Match expression lowering** — `Expr::Match` не поддерживается
 
 #### 🟡 MEDIUM PRIORITY
 

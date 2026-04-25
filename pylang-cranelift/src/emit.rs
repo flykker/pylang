@@ -15,17 +15,12 @@ pub fn write_simple_elf(output: &Path, ast: &[Stmt]) -> Result<(), String> {
     let mut module = create_module()?;
     
     // Lower all Python functions to CLIF via the new lowering pipeline
-    lower_module(&mut module, ast)?;
+    let func_ids = lower_module(&mut module, ast)?;
     
     // Ensure main exists — if not, create an empty one
     let _main_fn = ast.iter().find(|s| matches!(s, Stmt::Fn(f) if f.name == "main"));
     
-    // Create signature for main (returns i64, no params)
-    // The lower_fn already declared main with the correct signature
-    let mut main_sig = module.make_signature();
-    main_sig.returns.push(AbiParam::new(types::I64));
-    let main_id = module.declare_function("main", Linkage::Import, &main_sig)
-        .map_err(|e| e.to_string())?;
+    let main_id = *func_ids.get("main").ok_or("main function not found")?;
     
     // Create signature for _start (no returns - entry point)
     let start_sig = module.make_signature();
