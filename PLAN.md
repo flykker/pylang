@@ -398,6 +398,105 @@ main.py → Lexer → Parser → Sema → IR → cranelift-object → .o → rus
 - Исправлен `test_write_elf` — добавлен `ret: I64` и `return 0`
 - Исправлены clippy warnings (`unused_mut`)
 
+### Phase 2.12 — Closures, Higher-Order Functions & Decorators (завершена ✅)
+
+---
+
+### Phase 2.13 — Code Review Cleanup (текущая, необходимый рефакторинг)
+
+**Цель:** Исправить критические баги и технический долг, накопленный в Phase 2.6–2.12, перед переходом к Phase 3.
+
+#### 🔴 HIGH PRIORITY — Critical Bugs
+
+| # | Файл | Строка | Проблема | Исправление |
+|---|------|--------|----------|-------------|
+| 1 | `runtime/src/lib.rs:74` | Integer overflow UB | `(-x) as usize` крашится на `i64::MIN` | Заменить на `x.unsigned_abs()` |
+| 2 | `lower.rs:512` | `Type::Unit` → `I64` | Unit — void, не должен быть I64 | Убрать return type для Unit или исправить конвенцию |
+| 3 | `lower.rs:522-527` | `ast_type_to_clif` swallows error | При неизвестном типе молча возвращает I64 вместо Err | Изменить сигнатуру на `Result<Type, String>` |
+
+#### 🟡 MEDIUM PRIORITY — Code Quality
+
+| # | Файл | Проблема | Исправление |
+|---|------|----------|-------------|
+| 4 | `lower.rs:727-733` | Slice lowering — stub, игнорирует start/end/step | Или реализовать, или вернуть `Err` |
+| 5 | `lower.rs:900-939` | `range()`, `str()`, `input()` — builtins stubs | Вернуть `Err("not yet supported")` или реализовать |
+| 6 | `lower.rs:351-356, 465-470` | `clone()` всей HashMap на каждый вызов | Передавать `&HashMap` вместо `HashMap` |
+| 7 | `sema.rs:67-73` | 6/10 SemaError variants не используются | Удалить dead code |
+| 8 | `sema.rs:360-426` | `collect_identifiers_stmts` — dead code | Удалить |
+| 9 | `sema.rs:722` | `check_for`: target = I64 вместо элемента iterable | Выводить тип из iterable |
+| 10 | `sema.rs:1082-1091` | `field_type` не проверяет struct fields | Добавить проверку struct |
+| 11 | `parser.rs:75-88, 99-104` | `std::mem::discriminant` сравнивает только variant | Заменить на полное сравнение |
+| 12 | `lower.rs:335, 430` | `_dummy_slot` — unused variable | Удалить |
+| 13 | `emit.rs:20-21` | `_main_fn` — unused variable | Удалить |
+| 14 | `sema.rs:76, 90` | `#[allow(clippy::*)]` вместо исправления | Реализовать `Default` и исправить конструктор |
+| 15 | `runtime/src/lib.rs:13-14` | Heap allocator не thread-safe | Документировать или исправить |
+
+#### 🟢 LOW PRIORITY
+
+| # | Файл | Проблема | Исправление |
+|---|------|----------|-------------|
+| 16 | `AGENTS.md` / `PLAN.md` | Таблица Subscript/Slice помечена ✅, но Slice — stub | Исправить статус |
+| 17 | — | Нет тестов (`cargo test` = 0 passed) | Добавить базовые тесты |
+| 18 | `runtime/lib.rs:29-31` | `dealloc` — no-op, не документировано | Добавить комментарий |
+| 19 | `cli/main.rs:69` | `--emit ir` — заглушка | Убрать или реализовать |
+| 20 | `parser.rs:1187-1193` | `parse_raise` не поддерживает bare `raise` | Добавить поддержку |
+
+**Чеклист Phase 2.13:**
+- [ ] 1. Исправить i64::MIN UB в runtime
+- [ ] 2. Исправить Type::Unit → I64 inconsistency
+- [ ] 3. Исправить ast_type_to_clif — убрать silent fallback
+- [ ] 4. Slice — вернуть Err или реализовать
+- [ ] 5. Убрать clone() хеш-таблиц
+- [ ] 6. Удалить dead code (SemaError variants, collect_identifiers_stmts, _dummy_slot, _main_fn)
+- [ ] 7. Исправить check_for target type
+- [ ] 8. Добавить struct field checking в field_type
+- [ ] 9. Исправить parser discriminant comparison
+- [ ] 10. Убрать #[allow(clippy::*)] — реализовать правильно
+- [ ] 11. Добавить базовые тесты
+- [ ] 12. Обновить документацию
+- [ ] 13. cargo clippy — 0 warnings
+- [ ] 14. cargo test — тесты проходят
+- [ ] 15. ELF smoke test — print(42) работает
+
+**Цель:** Поддержка вложенных функций (closures), функций как значений (higher-order), chained calls и полноценных декораторов.
+
+**Чеклист:**
+
+- [x] 1. `print("string")` — print_str в lower_call
+- [x] 2. Closure hoisting — nested fn → module-level fn с name mangling
+- [x] 3. Closure environment struct (alloc + fn_ptr + captures)
+- [x] 4. `call_indirect` для вызова по fn_ptr (higher-order calls)
+- [x] 5. Chained calls: `Expr::Call` как func target
+- [x] 6. Тесты: test_decorator.py компилируется и работает
+- [x] 7. cargo clippy + cargo test
+- [x] 8. Обновить AGENTS.md / PLAN.md
+
+**Архитектура closure:**
+
+```
+Closure struct (heap-allocated):
+  offset 0: fn_ptr (i64)    — адрес скомпилированной hoisted функции
+  offset 8: cap_0 (i64)     — первая захваченная переменная
+  offset 16: cap_1 (i64)    — вторая захваченная переменная
+  ...
+
+Hoisted function signature:
+  fn(closure: i64, params...) -> i64
+
+Вызов closure:
+  closure_ptr = ... (результат вызова функции, вернувшей closure)
+  fn_ptr = load(closure_ptr, 0)  // адрес функции
+  call_indirect(fn_ptr, [closure_ptr, args...])
+```
+
+**Desugar декораторов (уже реализовано):**
+```python
+@dec(args)
+def foo():
+    pass
+# → foo = dec(args)(foo)
+```
+
 ### Code Review Summary (все phases)
 
 #### Метрики качества
@@ -427,7 +526,8 @@ main.py → Lexer → Parser → Sema → IR → cranelift-object → .o → rus
 | Try/Raise/With | ✅ | ✅ | ✅ (stub — возвращает ошибку) |
 | Return/Yield/Assert | ✅ | ✅ | ✅ (yield — stub) |
 | Str/Int/Float/Bool | ✅ | ✅ | ✅ |
-| Subscript/Slice | ✅ | ✅ | ✅ |
+| Subscript | ✅ | ✅ | ✅ |
+| Slice | ✅ | ✅ | ⚠️ (stub — игнорирует start/end/step) |
 | List/Dict literals | ✅ | ✅ | ✅ |
 | Struct | ✅ | ✅ | ✅ |
 | Class | ✅ | ✅ | ✅ |
@@ -436,13 +536,12 @@ main.py → Lexer → Parser → Sema → IR → cranelift-object → .o → rus
 
 | Feature | Status |
 |---------|--------|
-| Decorators | ❌ Parser+Sema+Lowering — нет |
-| For (без range) | ✅ Parser+Sema, ❌ Lowering |
 | Lambda | ✅ Parser+Sema, ❌ Lowering |
 | Async | ✅ Parser+Sema, ❌ Lowering |
 | Match expr | ✅ Parser, ❌ Lowering |
-| Comprehensions | ✅ Parser+Sema, ❌ Lowering |
+| Comprehensions (lowering) | ✅ Parser+Sema, ❌ Lowering |
 | Bytes | ✅ Parser, ❌ Sema+Lowering |
+| range(), str(), input() (builtins lowering) | ✅ Sema, ❌ Lowering (stub — всегда возвращает 0 или первый аргумент) |
 
 ---
 

@@ -422,6 +422,7 @@ impl<'src> Lexer<'src> {
                 TokenKind::Gt
             }
             '.' => TokenKind::Dot,
+            '@' => TokenKind::At,
             '_' => TokenKind::Underscore,
             '"' => return self.read_string(),
             '\'' => return self.read_char(),

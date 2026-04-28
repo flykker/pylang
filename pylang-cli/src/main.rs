@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
+use pylang_front::desugar;
 use pylang_front::lexer::Lexer;
 use pylang_front::parser::Parser as PylangParser;
 use pylang_front::sema::Sema;
@@ -23,6 +24,9 @@ struct Args {
 
     #[arg(long)]
     no_stdlib: bool,
+
+    #[arg(long)]
+    no_sema: bool,
 }
 
 fn main() -> Result<()> {
@@ -35,15 +39,19 @@ fn main() -> Result<()> {
     let mut parser = PylangParser::new(&source);
     
     match parser.parse(&mut sema) {
-        Ok(ast) => {
+        Ok(mut ast) => {
+            ast = desugar::desugar_decorators(ast);
             println!("Parsed {} statements", ast.len());
             
-            if let Err(errors) = sema.check_module(&ast) {
-                eprintln!("Semantic errors:");
-                for e in errors {
-                    eprintln!("{:?}", e);
+            if !args.no_sema {
+                if let Err(errors) = sema.check_module(&ast) {
+                    eprintln!("Semantic errors:");
+                    for e in errors {
+                        eprintln!("{:?}", e);
+                    }
+                    process::exit(1);
                 }
-                process::exit(1);
+                sema.fill_module_captures(&mut ast);
             }
             
             if let Some(emit) = &args.emit {

@@ -1,13 +1,14 @@
 //! Semantic Analyzer — name resolution, type inference, trait resolution.
 
-use crate::ast::{Class, Struct, *};
-use std::collections::HashMap;
+use crate::ast::{Class, Expr, Stmt, Struct, *};
+use std::collections::{HashMap, HashSet};
 
 pub struct Sema {
     pub types: TypeMap,
     pub names: NameMap,
     scopes: Vec<NameMap>,
     errors: Vec<SemaError>,
+    fn_captures: HashMap<String, Vec<String>>,
 }
 
 pub type TypeMap = HashMap<String, TypeDef>;
@@ -80,6 +81,7 @@ impl Sema {
             names: HashMap::new(),
             scopes: Vec::new(),
             errors: Vec::new(),
+            fn_captures: HashMap::new(),
         };
         s.init_builtins();
         s
@@ -157,11 +159,372 @@ impl Sema {
         for stmt in stmts {
             self.check_stmt(stmt)?;
         }
+        self.analyze_captures(stmts);
         if self.errors.is_empty() {
             Ok(())
         } else {
             Err(std::mem::take(&mut self.errors))
         }
+    }
+
+    pub fn fill_module_captures(&mut self, stmts: &mut [Stmt]) {
+        for stmt in stmts.iter_mut() {
+            match stmt {
+                Stmt::Fn(ref mut f) => {
+                    if let Some(caps) = self.fn_captures.get(&f.name) {
+                        f.captures = caps.clone();
+                    }
+                    self.fill_fn_captures_fn(f);
+                }
+                Stmt::Class(c) => {
+                    for item in c.body.iter_mut() {
+                        if let Stmt::Fn(ref mut f) = item {
+                            if let Some(caps) = self.fn_captures.get(&f.name) {
+                                f.captures = caps.clone();
+                            }
+                            self.fill_fn_captures_fn(f);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn fill_fn_captures_fn(&mut self, f: &mut crate::ast::Fn) {
+        for stmt in &mut f.body {
+            if let Stmt::Fn(ref mut nested) = stmt {
+                if let Some(caps) = self.fn_captures.get(&nested.name) {
+                    nested.captures = caps.clone();
+                }
+                self.fill_fn_captures_fn(nested);
+            }
+        }
+    }
+
+    fn analyze_captures(&mut self, stmts: &[Stmt]) {
+        self.fn_captures.clear();
+        let module_fns: HashSet<String> = stmts.iter()
+            .filter_map(|s| if let Stmt::Fn(f) = s { Some(f.name.clone()) } else { None })
+            .collect();
+        self.collect_fn_captures(stmts, &HashSet::new(), &module_fns);
+    }
+
+    fn collect_fn_captures(&mut self, stmts: &[Stmt], parent_locals: &HashSet<String>, module_fns: &HashSet<String>) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Fn(f) => {
+                    let mut all_locals = module_fns.clone();
+                    for param in &f.params {
+                        all_locals.insert(param.name.clone());
+                    }
+                    let nested_names = self.get_nested_fn_names(&f.body);
+                    for n in &nested_names {
+                        all_locals.insert(n.clone());
+                    }
+                    
+                    let captures = self.collect_stmt_captures(&f.body, &all_locals);
+                    self.fn_captures.insert(f.name.clone(), captures);
+                    
+                    let mut nested_parent_locals = parent_locals.clone();
+                    nested_parent_locals.insert(f.name.clone());
+                    for param in &f.params {
+                        nested_parent_locals.insert(param.name.clone());
+                    }
+                    self.collect_fn_captures(&f.body, &nested_parent_locals, module_fns);
+                }
+                Stmt::Class(c) => {
+                    for item in &c.body {
+                        if let Stmt::Fn(f) = item {
+                            let mut all_locals = module_fns.clone();
+                            all_locals.insert("self".to_string());
+                            for param in &f.params {
+                                all_locals.insert(param.name.clone());
+                            }
+                            let nested_names = self.get_nested_fn_names(&f.body);
+                            for n in &nested_names {
+                                all_locals.insert(n.clone());
+                            }
+                            
+                            let captures = self.collect_stmt_captures(&f.body, &all_locals);
+                            self.fn_captures.insert(f.name.clone(), captures);
+                            
+                            let mut nested_parent_locals = parent_locals.clone();
+                            nested_parent_locals.insert("self".to_string());
+                            for param in &f.params {
+                                nested_parent_locals.insert(param.name.clone());
+                            }
+                            self.collect_fn_captures(&f.body, &nested_parent_locals, module_fns);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn get_nested_fn_names(&self, stmts: &[Stmt]) -> Vec<String> {
+        let mut names = Vec::new();
+        for stmt in stmts {
+            if let Stmt::Fn(f) = stmt {
+                names.push(f.name.clone());
+            }
+        }
+        names
+    }
+
+    fn collect_stmt_captures(&self, stmts: &[Stmt], all_locals: &HashSet<String>) -> Vec<String> {
+        let mut used = HashSet::new();
+        self.collect_identifiers_with_locals(stmts, all_locals, &mut used);
+        let captures: Vec<String> = used.difference(all_locals).cloned().collect();
+        let mut result = captures;
+        result.sort();
+        result
+    }
+
+    fn collect_identifiers_with_locals(&self, stmts: &[Stmt], all_locals: &HashSet<String>, used: &mut HashSet<String>) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Fn(f) => {
+                    let mut nested_locals = all_locals.clone();
+                    for param in &f.params {
+                        nested_locals.insert(param.name.clone());
+                    }
+                    nested_locals.insert(f.name.clone());
+                    self.collect_identifiers_with_locals(&f.body, &nested_locals, used);
+                }
+                Stmt::Let(l) => {
+                    let mut used_inner = HashSet::new();
+                    self.collect_identifiers_expr(&l.val, &mut used_inner);
+                    used.extend(used_inner);
+                }
+                Stmt::LetMut(lm) => {
+                    let mut used_inner = HashSet::new();
+                    self.collect_identifiers_expr(&lm.val, &mut used_inner);
+                    used.extend(used_inner);
+                }
+                Stmt::Assign(a) => {
+                    let mut used_inner = HashSet::new();
+                    self.collect_identifiers_expr(&a.val, &mut used_inner);
+                    used.extend(used_inner);
+                }
+                Stmt::AssignOp(aop) => {
+                    let mut used_inner = HashSet::new();
+                    self.collect_identifiers_expr(&aop.val, &mut used_inner);
+                    used.extend(used_inner);
+                }
+                Stmt::If(i) => {
+                    self.collect_identifiers_expr(&i.cond, used);
+                    self.collect_identifiers_with_locals(&i.then, all_locals, used);
+                    for elif in &i.elif {
+                        self.collect_identifiers_expr(&elif.cond, used);
+                        self.collect_identifiers_with_locals(&elif.body, all_locals, used);
+                    }
+                    if let Some(ref else_body) = i.else_ {
+                        self.collect_identifiers_with_locals(else_body, all_locals, used);
+                    }
+                }
+                Stmt::While(w) => {
+                    self.collect_identifiers_expr(&w.cond, used);
+                    self.collect_identifiers_with_locals(&w.body, all_locals, used);
+                }
+                Stmt::For(f_loop) => {
+                    let mut used_inner = HashSet::new();
+                    self.collect_identifiers_expr(&f_loop.iter, &mut used_inner);
+                    used.extend(used_inner);
+                    self.collect_identifiers_with_locals(&f_loop.body, all_locals, used);
+                }
+                Stmt::Return(r) => {
+                    if let Some(ref val) = r.val {
+                        self.collect_identifiers_expr(val, used);
+                    }
+                }
+                Stmt::Yield(y) => {
+                    if let Some(ref val) = y.val {
+                        self.collect_identifiers_expr(val, used);
+                    }
+                }
+                Stmt::Raise(r) => self.collect_identifiers_expr(&r.exc, used),
+                Stmt::Assert(a) => {
+                    self.collect_identifiers_expr(&a.cond, used);
+                    if let Some(ref msg) = a.msg {
+                        self.collect_identifiers_expr(msg, used);
+                    }
+                }
+                Stmt::Expr(e) => self.collect_identifiers_expr(e, used),
+                _ => {}
+            }
+        }
+    }
+
+    fn collect_identifiers_stmts(&self, stmts: &[Stmt], used: &mut HashSet<String>) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Fn(f) => self.collect_identifiers_stmts(&f.body, used),
+                Stmt::Let(l) => {
+                    let mut used_inner = HashSet::new();
+                    self.collect_identifiers_expr(&l.val, &mut used_inner);
+                    used.extend(used_inner);
+                }
+                Stmt::LetMut(lm) => {
+                    let mut used_inner = HashSet::new();
+                    self.collect_identifiers_expr(&lm.val, &mut used_inner);
+                    used.extend(used_inner);
+                }
+                Stmt::Assign(a) => {
+                    let mut used_inner = HashSet::new();
+                    self.collect_identifiers_expr(&a.val, &mut used_inner);
+                    used.extend(used_inner);
+                }
+                Stmt::AssignOp(aop) => {
+                    let mut used_inner = HashSet::new();
+                    self.collect_identifiers_expr(&aop.val, &mut used_inner);
+                    used.extend(used_inner);
+                }
+                Stmt::If(i) => {
+                    self.collect_identifiers_expr(&i.cond, used);
+                    self.collect_identifiers_stmts(&i.then, used);
+                    for elif in &i.elif {
+                        self.collect_identifiers_expr(&elif.cond, used);
+                        self.collect_identifiers_stmts(&elif.body, used);
+                    }
+                    if let Some(ref else_body) = i.else_ {
+                        self.collect_identifiers_stmts(else_body, used);
+                    }
+                }
+                Stmt::While(w) => {
+                    self.collect_identifiers_expr(&w.cond, used);
+                    self.collect_identifiers_stmts(&w.body, used);
+                }
+                Stmt::For(f_loop) => {
+                    let mut used_inner = HashSet::new();
+                    self.collect_identifiers_expr(&f_loop.iter, &mut used_inner);
+                    used.extend(used_inner);
+                    self.collect_identifiers_stmts(&f_loop.body, used);
+                }
+                Stmt::Return(r) => {
+                    if let Some(ref val) = r.val {
+                        self.collect_identifiers_expr(val, used);
+                    }
+                }
+                Stmt::Yield(y) => {
+                    if let Some(ref val) = y.val {
+                        self.collect_identifiers_expr(val, used);
+                    }
+                }
+                Stmt::Raise(r) => self.collect_identifiers_expr(&r.exc, used),
+                Stmt::Assert(a) => {
+                    self.collect_identifiers_expr(&a.cond, used);
+                    if let Some(ref msg) = a.msg {
+                        self.collect_identifiers_expr(msg, used);
+                    }
+                }
+                Stmt::Expr(e) => self.collect_identifiers_expr(e, used),
+                _ => {}
+            }
+        }
+    }
+
+    fn collect_identifiers_expr(&self, expr: &Expr, used: &mut HashSet<String>) {
+        match expr {
+            Expr::Ident(name) => {
+                if !Self::is_builtin(name) {
+                    used.insert(name.clone());
+                }
+            }
+            Expr::BinOp { lhs, rhs, .. } => {
+                self.collect_identifiers_expr(lhs, used);
+                self.collect_identifiers_expr(rhs, used);
+            }
+            Expr::UnOp { val, .. } => self.collect_identifiers_expr(val, used),
+            Expr::Cmp { lhs, rhs, .. } => {
+                self.collect_identifiers_expr(lhs, used);
+                self.collect_identifiers_expr(rhs, used);
+            }
+            Expr::Call { func, args } => {
+                self.collect_identifiers_expr(func, used);
+                for arg in args {
+                    self.collect_identifiers_expr(arg, used);
+                }
+            }
+            Expr::Method { obj, args, .. } => {
+                self.collect_identifiers_expr(obj, used);
+                for arg in args {
+                    self.collect_identifiers_expr(arg, used);
+                }
+            }
+            Expr::Index { obj, idx } => {
+                self.collect_identifiers_expr(obj, used);
+                self.collect_identifiers_expr(idx, used);
+            }
+            Expr::Slice { obj, start, end, step } => {
+                self.collect_identifiers_expr(obj, used);
+                if let Some(s) = start { self.collect_identifiers_expr(s, used); }
+                if let Some(e) = end { self.collect_identifiers_expr(e, used); }
+                if let Some(st) = step { self.collect_identifiers_expr(st, used); }
+            }
+            Expr::Dot { obj, .. } => self.collect_identifiers_expr(obj, used),
+            Expr::If { cond, then, else_ } => {
+                self.collect_identifiers_expr(cond, used);
+                self.collect_identifiers_expr(then, used);
+                self.collect_identifiers_expr(else_, used);
+            }
+            Expr::Match { expr, arms } => {
+                self.collect_identifiers_expr(expr, used);
+                for arm in arms {
+                    if let Some(ref guard) = arm.guard {
+                        self.collect_identifiers_expr(guard, used);
+                    }
+                    self.collect_identifiers_stmts(&arm.body, used);
+                }
+            }
+            Expr::Tuple(elems) => {
+                for e in elems { self.collect_identifiers_expr(e, used); }
+            }
+            Expr::List(elems) => {
+                for e in elems { self.collect_identifiers_expr(e, used); }
+            }
+            Expr::Dict(items) => {
+                for (k, v) in items {
+                    self.collect_identifiers_expr(k, used);
+                    self.collect_identifiers_expr(v, used);
+                }
+            }
+            Expr::Set(elems) => {
+                for e in elems { self.collect_identifiers_expr(e, used); }
+            }
+            Expr::ListComp { body, generators } => {
+                self.collect_identifiers_expr(body, used);
+                for gen in generators {
+                    self.collect_identifiers_expr(&gen.iter, used);
+                    if let Some(ref cond) = gen.cond {
+                        self.collect_identifiers_expr(cond, used);
+                    }
+                }
+            }
+            Expr::DictComp { key, val, generators } => {
+                self.collect_identifiers_expr(key, used);
+                self.collect_identifiers_expr(val, used);
+                for gen in generators {
+                    self.collect_identifiers_expr(&gen.iter, used);
+                    if let Some(ref cond) = gen.cond {
+                        self.collect_identifiers_expr(cond, used);
+                    }
+                }
+            }
+            Expr::Lambda { body, .. } => self.collect_identifiers_expr(body, used),
+            Expr::Await(e) => self.collect_identifiers_expr(e, used),
+            Expr::YieldFrom(e) => self.collect_identifiers_expr(e, used),
+            _ => {}
+        }
+    }
+
+    fn is_builtin(name: &str) -> bool {
+        matches!(name, "print" | "len" | "range" | "int" | "str" | "bool" | "float" | "input")
+    }
+
+    pub fn get_captures(&self, fn_name: &str) -> Vec<String> {
+        self.fn_captures.get(fn_name).cloned().unwrap_or_default()
     }
 
     fn check_stmt(&mut self, stmt: &Stmt) -> Result<(), Vec<SemaError>> {
@@ -195,6 +558,11 @@ impl Sema {
     }
 
     fn check_fn(&mut self, f: &Fn) -> Result<(), Vec<SemaError>> {
+        let fn_ty = Type::Fn {
+            params: f.params.iter().map(|p| p.ty.clone()).collect(),
+            ret: Box::new(f.ret.clone().unwrap_or(Type::Unit)),
+        };
+        self.define_name(f.name.clone(), fn_ty, NameDef::Function);
         self.enter_scope();
         
         for param in &f.params {
@@ -495,10 +863,17 @@ impl Sema {
                 }
                 Ok(self.call_return_type(&func_ty))
             }
-            Expr::Method { obj, name: _, args } => {
-                let _ = self.check_expr(obj)?;
+            Expr::Method { obj, name, args } => {
+                let obj_ty = self.check_expr(obj)?;
                 for arg in args {
                     let _ = self.check_expr(arg)?;
+                }
+                if let Type::Class(class_name) = &obj_ty {
+                    if let Some(TypeDef::Class(c)) = self.types.get(class_name) {
+                        if let Some(method) = c.methods.get(name) {
+                            return Ok(method.ret.clone().unwrap_or(Type::Unit));
+                        }
+                    }
                 }
                 Ok(Type::Unit)
             }
@@ -965,5 +1340,31 @@ mod tests {
         let pass_stmt = AstStmt::Pass;
         let result = sema.check_stmt(&pass_stmt);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_capture_analysis() {
+        let code = r#"def outer(x):
+    def inner():
+        print(x)
+    return inner
+def main():
+    print(42)
+"#;
+        let mut sema = Sema::new();
+        let mut parser = crate::parser::Parser::new(code);
+        let mut ast = parser.parse(&mut sema).unwrap();
+        sema.check_module(&ast).unwrap();
+        sema.fill_module_captures(&mut ast);
+        
+        println!("All captures: {:?}", sema.fn_captures);
+        
+        let caps = sema.get_captures("inner");
+        println!("inner captures: {:?}", caps);
+        assert!(caps.contains(&"x".to_string()), "inner should capture 'x', got: {:?}", caps);
+        
+        let caps_outer = sema.get_captures("outer");
+        println!("outer captures: {:?}", caps_outer);
+        assert!(caps_outer.is_empty(), "outer should have no captures, got: {:?}", caps_outer);
     }
 }

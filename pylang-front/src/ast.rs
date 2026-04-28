@@ -45,6 +45,8 @@ pub struct Fn {
     pub params: Vec<Param>,
     pub ret: Option<Type>,
     pub body: Vec<Stmt>,
+    pub decorators: Vec<Expr>,
+    pub captures: Vec<String>,
 }
 
 #[derive(Clone, Debug)]

@@ -107,6 +107,7 @@ impl<'src> Parser<'src> {
         let token = self.current.clone().ok_or(ParseError::InvalidSyntax { span: Span::default() })?;
         
         match &token.value {
+            TokenKind::At => self.parse_decorated_fn(),
             TokenKind::Def => self.parse_fn(),
             TokenKind::Class => self.parse_class(),
             TokenKind::Struct => self.parse_struct(),
@@ -148,6 +149,22 @@ impl<'src> Parser<'src> {
         }
     }
 
+    fn parse_decorated_fn(&mut self) -> Result<Stmt, ParseError> {
+        let mut decorators = Vec::new();
+        while self.at(&TokenKind::At) {
+            self.bump();
+            decorators.push(self.parse_expr()?);
+            while self.at(&TokenKind::Newline) {
+                self.bump();
+            }
+        }
+        let mut fn_stmt = self.parse_fn()?;
+        if let Stmt::Fn(ref mut f) = fn_stmt {
+            f.decorators = decorators;
+        }
+        Ok(fn_stmt)
+    }
+
     fn parse_fn(&mut self) -> Result<Stmt, ParseError> {
         self.bump();
         
@@ -182,7 +199,7 @@ impl<'src> Parser<'src> {
         
         let body = self.parse_suite()?;
         
-        Ok(Stmt::Fn(Fn { name, params, ret, body }))
+        Ok(Stmt::Fn(Fn { name, params, ret, body, decorators: vec![], captures: vec![] }))
     }
 
     fn parse_param(&mut self) -> Result<Param, ParseError> {
@@ -1363,6 +1380,37 @@ mod tests {
         let mut sema = Sema::new();
         let result = parser.parse(&mut sema);
         assert!(result.is_ok(), "Index parse failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_decorator_simple() {
+        let code = "@dec\ndef foo():\n    pass";
+        let mut parser = Parser::new(code);
+        let mut sema = Sema::new();
+        let result = parser.parse(&mut sema);
+        assert!(result.is_ok(), "Decorator parse failed: {:?}", result.err());
+        let ast = result.unwrap();
+        assert_eq!(ast.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_decorator_chain() {
+        let code = "@dec1\n@dec2\ndef foo():\n    pass";
+        let mut parser = Parser::new(code);
+        let mut sema = Sema::new();
+        let result = parser.parse(&mut sema);
+        assert!(result.is_ok(), "Decorator chain parse failed: {:?}", result.err());
+        let ast = result.unwrap();
+        assert_eq!(ast.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_decorator_call() {
+        let code = "@dec(arg)\ndef foo():\n    pass";
+        let mut parser = Parser::new(code);
+        let mut sema = Sema::new();
+        let result = parser.parse(&mut sema);
+        assert!(result.is_ok(), "Decorator call parse failed: {:?}", result.err());
     }
 
     #[test]

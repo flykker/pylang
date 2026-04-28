@@ -39,6 +39,12 @@ pub fn write_simple_elf(output: &Path, ast: &[Stmt]) -> Result<(), String> {
     
     let _dummy_slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 32, 16));
     
+    // Call _init_module before main if it exists (for decorator desugaring, etc.)
+    if let Some(&init_id) = func_ids.get("_init_module") {
+        let callee_init = module.declare_func_in_func(init_id, builder.func);
+        builder.ins().call(callee_init, &[]);
+    }
+    
     // Call main without parameters
     let callee_main = module.declare_func_in_func(main_id, builder.func);
     builder.ins().call(callee_main, &[]);
@@ -164,6 +170,8 @@ mod tests {
                 }),
                 Stmt::Return(pylang_front::ast::Return { val: Some(Expr::Int(0)) }),
             ],
+            decorators: vec![],
+            captures: vec![],
         })];
         let result = write_simple_elf(output, &ast);
         if let Err(ref e) = result {

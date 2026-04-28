@@ -4,6 +4,7 @@ use cranelift_module::{Module, Linkage, FuncId};
 use pylang_front::ast::{
     Stmt, Expr, Type as AstType, BinOp, Fn as AstFn, CmpOp, UnOp,
     If, While, For, Loop, Match, Try, With, Raise, Assert, Yield,
+    Param,
 };
 use std::collections::HashMap;
 
@@ -28,6 +29,13 @@ pub struct ClassInfo {
     _methods: HashMap<String, String>,
 }
 
+#[derive(Clone)]
+pub struct ClosureInfo {
+    pub mangled_name: String,
+    pub func_id: FuncId,
+    pub capture_names: Vec<String>,
+}
+
 struct LoopContext {
     exit_block: Block,
     continue_block: Block,
@@ -37,6 +45,8 @@ pub struct LowerCtx<'a> {
     pub builder: FunctionBuilder<'a>,
     pub module: &'a mut dyn Module,
     pub locals: HashMap<String, Variable>,
+    pub func_ids: HashMap<String, FuncId>,
+    pub closure_defs: HashMap<String, ClosureInfo>,
     pub block_filled: bool,
     loop_stack: Vec<LoopContext>,
     pub struct_defs: HashMap<String, StructInfo>,
@@ -83,6 +93,7 @@ pub fn lower_module(module: &mut dyn Module, stmts: &[Stmt]) -> Result<HashMap<S
     let mut struct_defs: HashMap<String, StructInfo> = HashMap::new();
     let mut class_defs: HashMap<String, ClassInfo> = HashMap::new();
     let mut func_ids: HashMap<String, FuncId> = HashMap::new();
+    let mut closure_defs: HashMap<String, ClosureInfo> = HashMap::new();
 
     // First pass: collect all struct and class definitions (without methods)
     for stmt in stmts {
@@ -191,23 +202,99 @@ pub fn lower_module(module: &mut dyn Module, stmts: &[Stmt]) -> Result<HashMap<S
                             params,
                             ret: f.ret.clone(),
                             body: f.body.clone(),
+                            decorators: vec![],
+                            captures: vec![],
                         };
-                        let id = lower_fn(module, &method_fn, &struct_defs, &class_defs)?;
+                        let id = lower_fn(module, &method_fn, &struct_defs, &class_defs, &mut func_ids, &mut closure_defs)?;
                         func_ids.insert(method_name, id);
                     }
                 }
             }
             Stmt::Fn(f) => {
-                let id = lower_fn(module, f, &struct_defs, &class_defs)?;
+                let id = lower_fn(module, f, &struct_defs, &class_defs, &mut func_ids, &mut closure_defs)?;
                 func_ids.insert(f.name.clone(), id);
             }
             _ => {}
         }
     }
+    
+    // Third pass: lower module-level non-function statements (decorator desugaring, etc.)
+    let module_stmts: Vec<Stmt> = stmts.iter().filter(|s| {
+        !matches!(s, Stmt::Fn(_) | Stmt::Class(_) | Stmt::Struct(_))
+    }).cloned().collect();
+    
+    if !module_stmts.is_empty() {
+        let init_id = lower_module_init(module, &module_stmts, &struct_defs, &class_defs, &mut func_ids, &mut closure_defs)?;
+        func_ids.insert("_init_module".to_string(), init_id);
+    }
+    
     Ok(func_ids)
 }
 
-pub fn lower_fn(module: &mut dyn Module, f: &AstFn, struct_defs: &HashMap<String, StructInfo>, class_defs: &HashMap<String, ClassInfo>) -> Result<FuncId, String> {
+fn lower_module_init(
+    module: &mut dyn Module,
+    module_stmts: &[Stmt],
+    struct_defs: &HashMap<String, StructInfo>,
+    class_defs: &HashMap<String, ClassInfo>,
+    func_ids: &mut HashMap<String, FuncId>,
+    closure_defs: &mut HashMap<String, ClosureInfo>,
+) -> Result<FuncId, String> {
+    let init_fn = pylang_front::ast::Fn {
+        name: "_init_module".to_string(),
+        params: vec![],
+        ret: None,
+        body: module_stmts.to_vec(),
+        decorators: vec![],
+        captures: vec![],
+    };
+    lower_fn(module, &init_fn, struct_defs, class_defs, func_ids, closure_defs)
+}
+
+
+
+pub fn lower_fn(
+    module: &mut dyn Module,
+    f: &AstFn,
+    struct_defs: &HashMap<String, StructInfo>,
+    class_defs: &HashMap<String, ClassInfo>,
+    func_ids: &mut HashMap<String, FuncId>,
+    closure_defs: &mut HashMap<String, ClosureInfo>,
+) -> Result<FuncId, String> {
+    // Pre-pass: find nested functions and hoist them to module level
+    for stmt in &f.body {
+        if let Stmt::Fn(nested) = stmt {
+            if nested.captures.is_empty() {
+                continue;
+            }
+            let mangled_name = format!("{}_{}", f.name, nested.name);
+            // Hoisted function takes closure_ptr as first param, then actual params
+            let mut hoisted_params = vec![Param {
+                name: format!("__closure_{}", f.name),
+                ty: AstType::I64,
+                default: None,
+            }];
+            hoisted_params.extend(nested.params.clone());
+            let hoisted_fn = AstFn {
+                name: mangled_name.clone(),
+                params: hoisted_params,
+                ret: nested.ret.clone(),
+                body: nested.body.clone(),
+                decorators: vec![],
+                captures: vec![],
+            };
+            let nested_id = lower_fn_closure(
+                module, &hoisted_fn, &nested.captures,
+                struct_defs, class_defs, func_ids, closure_defs,
+            )?;
+            func_ids.insert(mangled_name.clone(), nested_id);
+            closure_defs.insert(nested.name.clone(), ClosureInfo {
+                mangled_name,
+                func_id: nested_id,
+                capture_names: nested.captures.clone(),
+            });
+        }
+    }
+
     let mut sig = module.make_signature();
     for param in &f.params {
         let ty = clif_type(&param.ty)?;
@@ -243,10 +330,8 @@ pub fn lower_fn(module: &mut dyn Module, f: &AstFn, struct_defs: &HashMap<String
     let entry = builder.create_block();
     builder.switch_to_block(entry);
 
-    // Append block parameters for function parameters (required for entry block)
     builder.append_block_params_for_function_params(entry);
 
-    // Force stack allocation to ensure 16-byte alignment before calls
     let _dummy_slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 4));
 
     let mut locals = HashMap::new();
@@ -263,6 +348,122 @@ pub fn lower_fn(module: &mut dyn Module, f: &AstFn, struct_defs: &HashMap<String
         builder,
         module,
         locals,
+        func_ids: func_ids.clone(),
+        closure_defs: closure_defs.clone(),
+        block_filled: false,
+        loop_stack: Vec::new(),
+        struct_defs: struct_defs.clone(),
+        class_defs: class_defs.clone(),
+    };
+
+    for stmt in &f.body {
+        if lctx.block_filled {
+            break;
+        }
+        lower_stmt(stmt, &mut lctx)?;
+    }
+
+    if !lctx.block_filled {
+        if let Some(ty) = ret_ty {
+            let zero = lctx.builder.ins().iconst(ty, 0);
+            lctx.builder.ins().return_(&[zero]);
+        } else {
+            lctx.builder.ins().return_(&[]);
+        }
+    }
+
+    lctx.builder.seal_all_blocks();
+    lctx.builder.finalize();
+
+    module.define_function(func_id, &mut ctx)
+        .map_err(|e| e.to_string())?;
+
+    Ok(func_id)
+}
+
+fn lower_fn_closure(
+    module: &mut dyn Module,
+    f: &AstFn,
+    capture_names: &[String],
+    struct_defs: &HashMap<String, StructInfo>,
+    class_defs: &HashMap<String, ClassInfo>,
+    func_ids: &mut HashMap<String, FuncId>,
+    closure_defs: &mut HashMap<String, ClosureInfo>,
+) -> Result<FuncId, String> {
+    // Hoisted function signature: (closure_ptr: i64, actual_params...) -> ret
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(types::I64)); // closure_ptr as first param
+    for param in &f.params {
+        let ty = clif_type(&param.ty)?;
+        sig.params.push(AbiParam::new(ty));
+    }
+    let has_return_val = f.body.iter().any(|s| {
+        matches!(s, Stmt::Return(r) if r.val.is_some())
+    });
+    let ret_ty = if let Some(ref t) = f.ret {
+        Some(clif_type(t)?)
+    } else if has_return_val {
+        Some(types::I64)
+    } else {
+        None
+    };
+    if let Some(ty) = ret_ty {
+        sig.returns.push(AbiParam::new(ty));
+    }
+
+    let linkage = Linkage::Export;
+    let func_id = module.declare_function(&f.name, linkage, &sig)
+        .map_err(|e| e.to_string())?;
+
+    let mut ctx = module.make_context();
+    ctx.func.signature = sig;
+    ctx.func.name = UserFuncName::user(0, func_id.as_u32());
+
+    let mut fn_ctx = FunctionBuilderContext::new();
+    let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fn_ctx);
+
+    let entry = builder.create_block();
+    builder.switch_to_block(entry);
+
+    builder.append_block_params_for_function_params(entry);
+
+    let _dummy_slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 4));
+
+    let mut locals = HashMap::new();
+
+    // param 0 = closure_ptr
+    let closure_ptr_ty = types::I64;
+    let closure_var = builder.declare_var(closure_ptr_ty);
+    let closure_ptr = builder.block_params(entry)[0];
+    builder.def_var(closure_var, closure_ptr);
+
+    // Load captured variables from closure struct (offset 8, 16, ...)
+    for (i, cap_name) in capture_names.iter().enumerate() {
+        let offset = (8 + i * 8) as i64;
+        let offset_val = builder.ins().iconst(types::I64, offset);
+        let addr = builder.ins().iadd(closure_ptr, offset_val);
+        let cap_val = builder.ins().load(types::I64, MemFlags::trusted(), addr, 0);
+        let var = builder.declare_var(types::I64);
+        builder.def_var(var, cap_val);
+        locals.insert(cap_name.clone(), var);
+    }
+
+    // Remaining params (after closure_ptr at index 0)
+    let actual_params_start = 1; // skip closure_ptr
+    for (i, param) in f.params.iter().enumerate() {
+        let ty = clif_type(&param.ty)?;
+        let var = builder.declare_var(ty);
+        let val = builder.block_params(entry)[actual_params_start + i];
+        builder.def_var(var, val);
+        locals.insert(param.name.clone(), var);
+    }
+
+    let mut lctx = LowerCtx {
+        builder,
+        module,
+        locals,
+        func_ids: func_ids.clone(),
+        closure_defs: closure_defs.clone(),
         block_filled: false,
         loop_stack: Vec::new(),
         struct_defs: struct_defs.clone(),
@@ -433,6 +634,12 @@ fn lower_stmt(stmt: &Stmt, lctx: &mut LowerCtx) -> Result<(), String> {
             Ok(())
         }
         Stmt::Pass => Ok(()),
+        Stmt::Fn(_f) => {
+            // Nested functions are hoisted to module level in lower_fn
+            // For non-capturing nested fns, store a func_addr local
+            // For capturing fns, closure structs are created in Expr::Ident
+            Ok(())
+        }
         _ => Err(format!("unsupported statement: {:?}", stmt)),
     }
 }
@@ -449,9 +656,42 @@ fn lower_expr(expr: &Expr, lctx: &mut LowerCtx) -> Result<Value, String> {
         Expr::Char(c) => Ok(lctx.builder.ins().iconst(types::I64, *c as i64)),
         Expr::None => Ok(lctx.builder.ins().iconst(types::I64, 0)),
         Expr::Ident(name) => {
-            let var = lctx.locals.get(name)
-                .ok_or_else(|| format!("undefined variable: {}", name))?;
-            Ok(lctx.builder.use_var(*var))
+            // Check if ident refers to a nested function (closure)
+            if let Some(closure_info) = lctx.closure_defs.get(name) {
+                let ci = closure_info.clone();
+                let num_captures = ci.capture_names.len();
+                let struct_size = 8 + (num_captures * 8);
+                let size_val = lctx.builder.ins().iconst(types::I64, struct_size as i64);
+                let closure_ptr = call_runtime(lctx, "alloc", &[size_val], types::I64)?;
+                
+                // Store fn_ptr at offset 0
+                let callee_ref = lctx.module.declare_func_in_func(ci.func_id, lctx.builder.func);
+                let fn_addr = lctx.builder.ins().func_addr(types::I64, callee_ref);
+                lctx.builder.ins().store(MemFlags::trusted(), fn_addr, closure_ptr, 0);
+                
+                // Store captured values at offsets 8, 16, ...
+                for (i, cap_name) in ci.capture_names.iter().enumerate() {
+                    let cap_val = if let Some(&var) = lctx.locals.get(cap_name) {
+                        lctx.builder.use_var(var)
+                    } else {
+                        return Err(format!("undefined captured variable: {}", cap_name));
+                    };
+                    let offset = lctx.builder.ins().iconst(types::I64, (8 + i * 8) as i64);
+                    let addr = lctx.builder.ins().iadd(closure_ptr, offset);
+                    lctx.builder.ins().store(MemFlags::trusted(), cap_val, addr, 0);
+                }
+                
+                Ok(closure_ptr)
+            } else if let Some(&var) = lctx.locals.get(name) {
+                // Check locals BEFORE func_ids (reassigned functions from decorators)
+                Ok(lctx.builder.use_var(var))
+            } else if let Some(&func_id) = lctx.func_ids.get(name) {
+                // Module-level function reference - return function address
+                let callee_ref = lctx.module.declare_func_in_func(func_id, lctx.builder.func);
+                Ok(lctx.builder.ins().func_addr(types::I64, callee_ref))
+            } else {
+                Err(format!("undefined variable: {}", name))
+            }
         }
         Expr::BinOp { op, lhs, rhs } => {
             let l = lower_expr(lhs, lctx)?;
@@ -632,15 +872,21 @@ fn lower_cmpop(lctx: &mut LowerCtx, op: &CmpOp, l: Value, r: Value) -> Result<Va
 }
 
 fn lower_call(func: &Expr, args: &[Expr], lctx: &mut LowerCtx) -> Result<Value, String> {
-    if let Expr::Ident(name) = func {
-        let arg_vals: Vec<Value> = args.iter()
-            .map(|a| lower_expr(a, lctx))
-            .collect::<Result<Vec<_>, _>>()?;
+    // Lower args first (needed for both direct and indirect calls)
+    let arg_vals: Vec<Value> = args.iter()
+        .map(|a| lower_expr(a, lctx))
+        .collect::<Result<Vec<_>, _>>()?;
 
+    if let Expr::Ident(name) = func {
         match name.as_str() {
             "print" => {
                 if let Some(&val) = arg_vals.first() {
-                    call_runtime(lctx, "print_int", &[val], types::I64)?;
+                    if let Some(Expr::Str(s)) = args.first() {
+                        let len = lctx.builder.ins().iconst(types::I64, s.len() as i64);
+                        call_runtime(lctx, "print_str", &[val, len], types::I64)?;
+                    } else {
+                        call_runtime(lctx, "print_int", &[val], types::I64)?;
+                    }
                 }
                 Ok(lctx.builder.ins().iconst(types::I64, 0))
             }
@@ -718,23 +964,41 @@ fn lower_call(func: &Expr, args: &[Expr], lctx: &mut LowerCtx) -> Result<Value, 
                         lctx.builder.ins().store(MemFlags::trusted(), val, addr, 0);
                     }
                     
-                    // Automatically call __init__ if it exists
                     if let Some(init_name) = class_info._methods.get("__init__") {
                         let mut init_sig = lctx.module.make_signature();
                         init_sig.params.push(AbiParam::new(types::I64));
                         for _arg in &arg_vals {
                             init_sig.params.push(AbiParam::new(types::I64));
                         }
-                        init_sig.returns.push(AbiParam::new(types::I64));
                         let mut init_args = vec![ptr];
                         init_args.extend(&arg_vals);
-                        let init_id = lctx.module.declare_function(init_name, Linkage::Import, &init_sig)
-                            .map_err(|e| format!("init: {}", e))?;
+                        let init_id = match lctx.module.declare_function(init_name, Linkage::Import, &init_sig) {
+                            Ok(id) => id,
+                            Err(_) => {
+                                let mut sig2 = lctx.module.make_signature();
+                                sig2.params.push(AbiParam::new(types::I64));
+                                for _arg in &arg_vals {
+                                    sig2.params.push(AbiParam::new(types::I64));
+                                }
+                                sig2.returns.push(AbiParam::new(types::I64));
+                                lctx.module.declare_function(init_name, Linkage::Import, &sig2)
+                                    .map_err(|e| format!("init: {}", e))?
+                            }
+                        };
                         let init_ref = lctx.module.declare_func_in_func(init_id, lctx.builder.func);
                         lctx.builder.ins().call(init_ref, &init_args);
                     }
                     
                     Ok(ptr)
+                } else if let Some(&callee_id) = lctx.func_ids.get(name) {
+                    let callee_ref = lctx.module.declare_func_in_func(callee_id, lctx.builder.func);
+                    let call = lctx.builder.ins().call(callee_ref, &arg_vals);
+                    let result = lctx.builder.inst_results(call);
+                    if result.is_empty() {
+                        Ok(lctx.builder.ins().iconst(types::I64, 0))
+                    } else {
+                        Ok(result[0])
+                    }
                 } else {
                     let mut sig = lctx.module.make_signature();
                     for arg in &arg_vals {
@@ -756,7 +1020,29 @@ fn lower_call(func: &Expr, args: &[Expr], lctx: &mut LowerCtx) -> Result<Value, 
             }
         }
     } else {
-        Err("unsupported call target".to_string())
+        // Chained / indirect call: lower func expression to get closure pointer
+        let closure_ptr = lower_expr(func, lctx)?;
+        // Load fn_ptr from offset 0 of closure struct
+        let fn_ptr = lctx.builder.ins().load(types::I64, MemFlags::trusted(), closure_ptr, 0);
+        
+        // Build signature: (closure_ptr: i64, args...) -> i64
+        let mut sig = lctx.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // closure_ptr
+        for arg in &arg_vals {
+            sig.params.push(AbiParam::new(lctx.builder.func.dfg.value_type(*arg)));
+        }
+        sig.returns.push(AbiParam::new(types::I64));
+        
+        let sig_ref = lctx.builder.import_signature(sig);
+        let mut all_args = vec![closure_ptr];
+        all_args.extend(&arg_vals);
+        let call = lctx.builder.ins().call_indirect(sig_ref, fn_ptr, &all_args);
+        let results = lctx.builder.inst_results(call);
+        if results.is_empty() {
+            Ok(lctx.builder.ins().iconst(types::I64, 0))
+        } else {
+            Ok(results[0])
+        }
     }
 }
 
@@ -792,8 +1078,21 @@ fn lower_method(obj: &Expr, method_name: &str, args: &[Expr], lctx: &mut LowerCt
     }
     sig.returns.push(AbiParam::new(types::I64));
 
-    let callee_id = lctx.module.declare_function(&full_method_name, Linkage::Import, &sig)
-        .map_err(|e| format!("{}: {}", full_method_name, e))?;
+    let callee_id = match lctx.module.declare_function(&full_method_name, Linkage::Import, &sig) {
+        Ok(id) => id,
+        Err(_) => {
+            // Function declared without return value, try without
+            let mut sig2 = lctx.module.make_signature();
+            for arg in &arg_vals {
+                sig2.params.push(AbiParam::new(lctx.builder.func.dfg.value_type(*arg)));
+            }
+            let callee_id2 = lctx.module.declare_function(&full_method_name, Linkage::Import, &sig2)
+                .map_err(|e| format!("{}: {}", full_method_name, e))?;
+            let callee_ref2 = lctx.module.declare_func_in_func(callee_id2, lctx.builder.func);
+            lctx.builder.ins().call(callee_ref2, &arg_vals);
+            return Ok(lctx.builder.ins().iconst(types::I64, 0));
+        }
+    };
     
     let callee_ref = lctx.module.declare_func_in_func(callee_id, lctx.builder.func);
     let call = lctx.builder.ins().call(callee_ref, &arg_vals);
@@ -1155,8 +1454,12 @@ mod tests {
                 }),
                 Stmt::Return(pylang_front::ast::Return { val: Some(Expr::Int(0)) }),
             ],
+            decorators: vec![],
+            captures: vec![],
         };
-        let result = lower_fn(&mut module, &func, &HashMap::new(), &HashMap::new());
+        let mut func_ids = HashMap::new();
+        let mut closure_defs = HashMap::new();
+        let result = lower_fn(&mut module, &func, &HashMap::new(), &HashMap::new(), &mut func_ids, &mut closure_defs);
         assert!(result.is_ok(), "lower_fn failed: {:?}", result.err());
     }
 
@@ -1178,8 +1481,12 @@ mod tests {
                     else_: None,
                 }),
             ],
+            decorators: vec![],
+            captures: vec![],
         };
-        let result = lower_fn(&mut module, &func, &HashMap::new(), &HashMap::new());
+        let mut func_ids = HashMap::new();
+        let mut closure_defs = HashMap::new();
+        let result = lower_fn(&mut module, &func, &HashMap::new(), &HashMap::new(), &mut func_ids, &mut closure_defs);
         assert!(result.is_ok(), "lower_fn with if failed: {:?}", result.err());
     }
 
@@ -1196,8 +1503,12 @@ mod tests {
                     body: vec![],
                 }),
             ],
+            decorators: vec![],
+            captures: vec![],
         };
-        let result = lower_fn(&mut module, &func, &HashMap::new(), &HashMap::new());
+        let mut func_ids = HashMap::new();
+        let mut closure_defs = HashMap::new();
+        let result = lower_fn(&mut module, &func, &HashMap::new(), &HashMap::new(), &mut func_ids, &mut closure_defs);
         assert!(result.is_ok(), "lower_fn with while failed: {:?}", result.err());
     }
 
@@ -1215,8 +1526,12 @@ mod tests {
                     rhs: Box::new(Expr::Int(2)),
                 }),
             ],
+            decorators: vec![],
+            captures: vec![],
         };
-        let result = lower_fn(&mut module, &func, &HashMap::new(), &HashMap::new());
+        let mut func_ids = HashMap::new();
+        let mut closure_defs = HashMap::new();
+        let result = lower_fn(&mut module, &func, &HashMap::new(), &HashMap::new(), &mut func_ids, &mut closure_defs);
         assert!(result.is_ok(), "lower_fn with add failed: {:?}", result.err());
     }
 
@@ -1240,6 +1555,8 @@ mod tests {
                     name: "x".to_string(),
                 }),
             ],
+            decorators: vec![],
+            captures: vec![],
         };
         let mut struct_defs: HashMap<String, StructInfo> = HashMap::new();
         struct_defs.insert("Point".to_string(), StructInfo {
@@ -1249,7 +1566,10 @@ mod tests {
                 StructField { _name: "y".to_string(), offset: 8, _ty: types::I64 },
             ],
         });
-        let result = lower_fn(&mut module, &func, &struct_defs, &HashMap::new());
+        let mut func_ids = HashMap::new();
+        let mut closure_defs = HashMap::new();
+        let result = lower_fn(&mut module, &func, &struct_defs, &HashMap::new(), &mut func_ids, &mut closure_defs);
         assert!(result.is_ok(), "lower_fn with struct failed: {:?}", result.err());
     }
+
 }
