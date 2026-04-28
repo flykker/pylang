@@ -71,7 +71,7 @@ pub extern "C" fn print_int(x: i64) {
         i = 1;
     }
 
-    let abs_x = if x < 0 { (-x) as usize } else { x as usize };
+    let abs_x = x.unsigned_abs() as usize;
     let mut digits = [0u8; 20];
     let mut j = 0;
     let mut n = abs_x;

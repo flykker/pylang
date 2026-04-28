@@ -102,10 +102,11 @@ pub fn lower_module(module: &mut dyn Module, stmts: &[Stmt]) -> Result<HashMap<S
                 let mut offset = 0i64;
                 let mut fields: Vec<StructField> = Vec::new();
                 for (name, ty) in &s.fields {
+                    let ty = ast_type_to_clif(ty)?;
                     fields.push(StructField {
                         _name: name.clone(),
                         offset,
-                        _ty: ast_type_to_clif(ty),
+                        _ty: ty,
                     });
                     offset += 8;
                 }
@@ -519,11 +520,8 @@ fn clif_type(ty: &AstType) -> Result<Type, String> {
     }
 }
 
-fn ast_type_to_clif(ty: &AstType) -> Type {
-    match clif_type(ty) {
-        Ok(t) => t,
-        Err(_) => types::I64,
-    }
+fn ast_type_to_clif(ty: &AstType) -> Result<Type, String> {
+    clif_type(ty)
 }
 
 fn lower_stmt(stmt: &Stmt, lctx: &mut LowerCtx) -> Result<(), String> {
@@ -724,13 +722,7 @@ fn lower_expr(expr: &Expr, lctx: &mut LowerCtx) -> Result<Value, String> {
             let addr = lctx.builder.ins().iadd(obj_val, offset);
             Ok(lctx.builder.ins().load(types::I64, MemFlags::trusted(), addr, 0))
         }
-        Expr::Slice { obj, start, end, step } => {
-            let obj_val = lower_expr(obj, lctx)?;
-            let _start = start.as_ref().map(|s| lower_expr(s, lctx)).transpose()?;
-            let _end = end.as_ref().map(|e| lower_expr(e, lctx)).transpose()?;
-            let _step = step.as_ref().map(|s| lower_expr(s, lctx)).transpose()?;
-            Ok(obj_val)
-        }
+        Expr::Slice { .. } => Err("slice lowering not yet supported".to_string()),
         Expr::Tuple(elems) | Expr::List(elems) | Expr::Set(elems) => {
             let vals: Vec<Value> = elems.iter()
                 .map(|e| lower_expr(e, lctx))
@@ -897,9 +889,7 @@ fn lower_call(func: &Expr, args: &[Expr], lctx: &mut LowerCtx) -> Result<Value, 
                     Err("len() requires argument".to_string())
                 }
             }
-            "range" => {
-                Ok(arg_vals.first().copied().unwrap_or_else(|| lctx.builder.ins().iconst(types::I64, 0)))
-            }
+            "range" => Err("range() not yet supported in lowering".to_string()),
             "int" => {
                 if let Some(&val) = arg_vals.first() {
                     let ty = lctx.builder.func.dfg.value_type(val);
@@ -912,9 +902,7 @@ fn lower_call(func: &Expr, args: &[Expr], lctx: &mut LowerCtx) -> Result<Value, 
                     Err("int() requires argument".to_string())
                 }
             }
-            "str" => {
-                Ok(arg_vals.first().copied().unwrap_or_else(|| lctx.builder.ins().iconst(types::I64, 0)))
-            }
+            "str" => Err("str() not yet supported in lowering".to_string()),
             "bool" => {
                 if let Some(&val) = arg_vals.first() {
                     let ty = lctx.builder.func.dfg.value_type(val);
@@ -936,7 +924,7 @@ fn lower_call(func: &Expr, args: &[Expr], lctx: &mut LowerCtx) -> Result<Value, 
                     Err("float() requires argument".to_string())
                 }
             }
-            "input" => Ok(lctx.builder.ins().iconst(types::I64, 0)),
+            "input" => Err("input() not yet supported in lowering".to_string()),
             _ => {
                 if let Some(struct_info) = lctx.struct_defs.get(name).cloned() {
                     let size = lctx.builder.ins().iconst(types::I64, (struct_info.fields.len() * 8) as i64);

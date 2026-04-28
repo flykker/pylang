@@ -402,9 +402,9 @@ main.py → Lexer → Parser → Sema → IR → cranelift-object → .o → rus
 
 ---
 
-### Phase 2.13 — Code Review Cleanup (текущая, необходимый рефакторинг)
+### Phase 2.13 — Code Review Cleanup (завершена ✅)
 
-**Цель:** Исправить критические баги и технический долг, накопленный в Phase 2.6–2.12, перед переходом к Phase 3.
+**Цель:** Исправить критические баги и технический долг.
 
 #### 🔴 HIGH PRIORITY — Critical Bugs
 
