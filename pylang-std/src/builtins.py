@@ -15,22 +15,6 @@ def range(n: int) -> list[int]:
         i = i + 1
     return result
 
-def zip(a: list[int], b: list[int]) -> list[tuple[int, int]]:
-    result: list[tuple[int, int]] = []
-    i: int = 0
-    while i < len(a):
-        result.append((a[i], b[i]))
-        i = i + 1
-    return result
-
-def enumerate(items: list[int]) -> list[tuple[int, int]]:
-    result: list[tuple[int, int]] = []
-    i: int = 0
-    while i < len(items):
-        result.append((i, items[i]))
-        i = i + 1
-    return result
-
 def map(func: int, items: list[int]) -> list[int]:
     result: list[int] = []
     for item in items:
@@ -49,25 +33,3 @@ def sum(items: list[int]) -> int:
     for item in items:
         total = total + item
     return total
-
-def min(items: list[int]) -> int:
-    if len(items) == 0:
-        return 0
-    result: int = items[0]
-    i: int = 1
-    while i < len(items):
-        if items[i] < result:
-            result = items[i]
-        i = i + 1
-    return result
-
-def max(items: list[int]) -> int:
-    if len(items) == 0:
-        return 0
-    result: int = items[0]
-    i: int = 1
-    while i < len(items):
-        if items[i] > result:
-            result = items[i]
-        i = i + 1
-    return result
