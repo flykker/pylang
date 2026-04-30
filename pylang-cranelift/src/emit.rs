@@ -49,9 +49,10 @@ pub fn write_simple_elf(output: &Path, ast: &[Stmt]) -> Result<(), String> {
     let callee_main = module.declare_func_in_func(main_id, builder.func);
     builder.ins().call(callee_main, &[]);
     
-    let zero = builder.ins().iconst(types::I32, 0);
+    let zero = builder.ins().iconst(types::I64, 0);
     let mut exit_sig = module.make_signature();
-    exit_sig.params.push(AbiParam::new(types::I32));
+    exit_sig.params.push(AbiParam::new(types::I64));
+    exit_sig.returns.push(AbiParam::new(types::I64));
     let exit_id = module.declare_function("exit", Linkage::Import, &exit_sig)
         .map_err(|e| e.to_string())?;
     let callee_exit = module.declare_func_in_func(exit_id, builder.func);
@@ -59,11 +60,8 @@ pub fn write_simple_elf(output: &Path, ast: &[Stmt]) -> Result<(), String> {
     builder.ins().return_(&[]);
     
     builder.finalize();
-    match module.define_function(start_id, &mut ctx) {
-        Ok(()) => {}
-        Err(e) => {
-            return Err(e.to_string());
-        }
+    if let Err(e) = module.define_function(start_id, &mut ctx) {
+        return Err(format!("Verifier error: {}", e));
     }
     
     // Emit object file

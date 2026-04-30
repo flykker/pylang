@@ -95,6 +95,8 @@ pub fn lower_module(module: &mut dyn Module, stmts: &[Stmt]) -> Result<HashMap<S
     let mut func_ids: HashMap<String, FuncId> = HashMap::new();
     let mut closure_defs: HashMap<String, ClosureInfo> = HashMap::new();
 
+    
+
     // First pass: collect all struct and class definitions (without methods)
     for stmt in stmts {
         match stmt {
@@ -212,7 +214,9 @@ pub fn lower_module(module: &mut dyn Module, stmts: &[Stmt]) -> Result<HashMap<S
                 }
             }
             Stmt::Fn(f) => {
+                
                 let id = lower_fn(module, f, &struct_defs, &class_defs, &mut func_ids, &mut closure_defs)?;
+                
                 func_ids.insert(f.name.clone(), id);
             }
             _ => {}
@@ -320,6 +324,8 @@ pub fn lower_fn(
     let linkage = if f.name.starts_with('_') { Linkage::Local } else { Linkage::Export };
     let func_id = module.declare_function(&f.name, linkage, &sig)
         .map_err(|e| e.to_string())?;
+    
+    
 
     let mut ctx = module.make_context();
     ctx.func.signature = sig;
@@ -511,6 +517,7 @@ fn clif_type(ty: &AstType) -> Result<Type, String> {
         AstType::Bool => Ok(types::I8),
         AstType::Char => Ok(types::I64),
         AstType::Unit => Ok(types::I64),
+        AstType::String => Ok(types::I64),  // String pointer
         AstType::Named(n) if n == "int" => Ok(types::I64),
         AstType::Named(n) if n == "float" => Ok(types::F64),
         AstType::Named(n) if n == "bool" => Ok(types::I8),
@@ -528,6 +535,7 @@ fn lower_stmt(stmt: &Stmt, lctx: &mut LowerCtx) -> Result<(), String> {
     if lctx.block_filled {
         return Ok(());
     }
+    
     match stmt {
         Stmt::Let(l) => {
             let val = lower_expr(&l.val, lctx)?;
@@ -874,8 +882,10 @@ fn lower_call(func: &Expr, args: &[Expr], lctx: &mut LowerCtx) -> Result<Value, 
             "print" => {
                 if let Some(&val) = arg_vals.first() {
                     if let Some(Expr::Str(s)) = args.first() {
+                        let eight = lctx.builder.ins().iconst(types::I64, 8);
+                        let data_ptr = lctx.builder.ins().iadd(val, eight);
                         let len = lctx.builder.ins().iconst(types::I64, s.len() as i64);
-                        call_runtime(lctx, "print_str", &[val, len], types::I64)?;
+                        call_runtime(lctx, "print_str", &[data_ptr, len], types::I64)?;
                     } else {
                         call_runtime(lctx, "print_int", &[val], types::I64)?;
                     }
@@ -925,6 +935,151 @@ fn lower_call(func: &Expr, args: &[Expr], lctx: &mut LowerCtx) -> Result<Value, 
                 }
             }
             "input" => Err("input() not yet supported in lowering".to_string()),
+            "socket" => {
+                if arg_vals.len() >= 3 {
+                    let domain = arg_vals[0];
+                    let kind = arg_vals[1];
+                    let protocol = arg_vals[2];
+                    call_runtime(lctx, "socket", &[domain, kind, protocol], types::I64)
+                } else {
+                    Err("socket(domain, type, protocol) requires 3 arguments".to_string())
+                }
+            }
+            "bind" => {
+                if arg_vals.len() >= 3 {
+                    let fd = arg_vals[0];
+                    let ip_ptr = arg_vals[1];
+                    let port = arg_vals[2];
+                    // string struct: data at ptr+8
+                    let eight = lctx.builder.ins().iconst(types::I64, 8);
+                    let data_ptr = lctx.builder.ins().iadd(ip_ptr, eight);
+                    let sockaddr = call_runtime(lctx, "string_to_sockaddr", &[data_ptr, port], types::I64)?;
+                    let addrlen = lctx.builder.ins().iconst(types::I64, 16);
+                    call_runtime(lctx, "bind", &[fd, sockaddr, addrlen], types::I64)
+                } else {
+                    Err("bind(fd, ip_str, port) requires 3 arguments".to_string())
+                }
+            }
+            "listen" => {
+                if arg_vals.len() >= 2 {
+                    let fd = arg_vals[0];
+                    let backlog = arg_vals[1];
+                    // Use I64 directly - runtime will truncate if needed
+                    call_runtime(lctx, "listen", &[fd, backlog], types::I64)
+                } else {
+                    Err("listen(fd, backlog) requires 2 arguments".to_string())
+                }
+            }
+            "accept" => {
+                if let Some(&fd) = arg_vals.first() {
+                    call_runtime(lctx, "accept", &[fd], types::I64)
+                } else {
+                    Err("accept(fd) requires argument".to_string())
+                }
+            }
+            "recv" => {
+                if arg_vals.len() >= 2 {
+                    let fd = arg_vals[0];
+                    let size = arg_vals[1];
+                    // Allocate string struct: [len: i64][data: u8 * size]
+                    let header = lctx.builder.ins().iconst(types::I64, 8);
+                    let total = lctx.builder.ins().iadd(header, size);
+                    let buf = call_runtime(lctx, "alloc", &[total], types::I64)?;
+                    // recv reads into buf+8, stores actual length at buf[0]
+                    let _n = call_runtime(lctx, "recv", &[fd, buf, size], types::I64)?;
+                    Ok(buf)
+                } else {
+                    Err("recv(fd, size) requires 2 arguments".to_string())
+                }
+            }
+            "recv_string" => {
+                if arg_vals.len() >= 2 {
+                    let fd = arg_vals[0];
+                    let size = arg_vals[1];
+                    let header = lctx.builder.ins().iconst(types::I64, 8);
+                    let total = lctx.builder.ins().iadd(header, size);
+                    let buf = call_runtime(lctx, "alloc", &[total], types::I64)?;
+                    let _n = call_runtime(lctx, "recv", &[fd, buf, size], types::I64)?;
+                    Ok(buf)
+                } else {
+                    Err("recv_string(fd, size) requires 2 arguments".to_string())
+                }
+            }
+            "recv_buf_ptr" => {
+                call_runtime(lctx, "recv_buf_ptr", &[], types::I64)
+            }
+            "recv_buf_len" => {
+                call_runtime(lctx, "recv_buf_len", &[], types::I64)
+            }
+            "alloc_copy" => {
+                if arg_vals.len() >= 2 {
+                    let src = arg_vals[0];
+                    let len = arg_vals[1];
+                    call_runtime(lctx, "alloc_copy", &[src, len], types::I64)
+                } else {
+                    Err("alloc_copy(src, len) requires 2 arguments".to_string())
+                }
+            }
+            "string_ptr" => {
+                if !arg_vals.is_empty() {
+                    let idx = arg_vals[0];
+                    call_runtime(lctx, "string_ptr", &[idx], types::I64)
+                } else {
+                    Err("string_ptr(idx) requires 1 argument".to_string())
+                }
+            }
+            "send" => {
+                if arg_vals.len() >= 2 {
+                    let fd = arg_vals[0];
+                    let data = arg_vals[1];
+                    call_runtime(lctx, "send", &[fd, data], types::I64)
+                } else {
+                    Err("send(fd, data) requires 2 arguments".to_string())
+                }
+            }
+            "connect" => {
+                if arg_vals.len() >= 3 {
+                    let fd = arg_vals[0];
+                    let ip_ptr = arg_vals[1];
+                    let port = arg_vals[2];
+                    let eight = lctx.builder.ins().iconst(types::I64, 8);
+                    let data_ptr = lctx.builder.ins().iadd(ip_ptr, eight);
+                    let sockaddr = call_runtime(lctx, "string_to_sockaddr", &[data_ptr, port], types::I64)?;
+                    let addrlen = lctx.builder.ins().iconst(types::I64, 16);
+                    call_runtime(lctx, "connect", &[fd, sockaddr, addrlen], types::I64)
+                } else {
+                    Err("connect(fd, ip_str, port) requires 3 arguments".to_string())
+                }
+            }
+            "exit" => {
+                if let Some(&code) = arg_vals.first() {
+                    call_runtime(lctx, "exit", &[code], types::I64)
+                } else {
+                    Err("exit(code) requires argument".to_string())
+                }
+            }
+            "close" => {
+                if let Some(&fd) = arg_vals.first() {
+                    call_runtime(lctx, "close", &[fd], types::I64)
+                } else {
+                    Err("close(fd) requires argument".to_string())
+                }
+            }
+            "setsockopt" => {
+                if arg_vals.len() >= 4 {
+                    let fd = arg_vals[0];
+                    let level = arg_vals[1];
+                    let optname = arg_vals[2];
+                    let optval = arg_vals[3];
+                    // Allocate 4 bytes for optval, store it, pass pointer
+                    let four = lctx.builder.ins().iconst(types::I64, 4);
+                    let buf = call_runtime(lctx, "alloc", &[four], types::I64)?;
+                    lctx.builder.ins().store(MemFlags::new(), optval, buf, 0);
+                    call_runtime(lctx, "setsockopt", &[fd, level, optname, buf, four], types::I64)
+                } else {
+                    Err("setsockopt(fd, level, optname, optval) requires 4 arguments".to_string())
+                }
+            }
             _ => {
                 if let Some(struct_info) = lctx.struct_defs.get(name).cloned() {
                     let size = lctx.builder.ins().iconst(types::I64, (struct_info.fields.len() * 8) as i64);
@@ -1107,15 +1262,23 @@ fn call_runtime(lctx: &mut LowerCtx, name: &str, args: &[Value], ret_ty: Type) -
     if results.is_empty() {
         Ok(lctx.builder.ins().iconst(types::I64, 0))
     } else {
-        Ok(results[0])
+        let result = results[0];
+        let result_ty = lctx.builder.func.dfg.value_type(result);
+        if result_ty == types::I64 {
+            Ok(result)
+        } else {
+            Ok(lctx.builder.ins().sextend(types::I64, result))
+        }
     }
 }
 
 fn alloc_string_literal(lctx: &mut LowerCtx, bytes: &[u8]) -> Result<Value, String> {
-    let size = lctx.builder.ins().iconst(types::I64, bytes.len() as i64);
-    let ptr = call_runtime(lctx, "alloc", &[size], types::I64)?;
+    let total_size = lctx.builder.ins().iconst(types::I64, (bytes.len() + 8) as i64);
+    let ptr = call_runtime(lctx, "alloc", &[total_size], types::I64)?;
+    let len_val = lctx.builder.ins().iconst(types::I64, bytes.len() as i64);
+    lctx.builder.ins().store(MemFlags::trusted(), len_val, ptr, 0);
     for (i, &b) in bytes.iter().enumerate() {
-        let offset = lctx.builder.ins().iconst(types::I64, i as i64);
+        let offset = lctx.builder.ins().iconst(types::I64, (i + 8) as i64);
         let addr = lctx.builder.ins().iadd(ptr, offset);
         let byte_val = lctx.builder.ins().iconst(types::I8, b as i64);
         lctx.builder.ins().store(MemFlags::trusted(), byte_val, addr, 0);
@@ -1393,7 +1556,7 @@ fn lower_assert(a: &Assert, lctx: &mut LowerCtx) -> Result<(), String> {
     lctx.block_filled = true;
 
     lctx.switch_to_block(else_block);
-    let one = lctx.builder.ins().iconst(types::I32, 1);
+    let one = lctx.builder.ins().iconst(types::I64, 1);
     call_runtime(lctx, "exit", &[one], types::I64)?;
     if !lctx.block_filled {
         lctx.builder.ins().return_(&[]);

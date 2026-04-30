@@ -542,10 +542,39 @@ def foo():
 | Comprehensions (lowering) | ✅ Parser+Sema, ❌ Lowering |
 | Bytes | ✅ Parser, ❌ Sema+Lowering |
 | range(), str(), input() (builtins lowering) | ✅ Sema, ❌ Lowering (stub — всегда возвращает 0 или первый аргумент) |
+| socket/connect/exit (builtins) | ❌ Parser, ✅ Sema+Lowering |
+| bind/listen/accept/close (builtins) | ❌ Parser, ✅ Sema+Lowering |
+| recv/send (builtins) | ❌ Parser, ✅ Sema+Lowering |
+| setsockopt (builtin) | ❌ Parser, ✅ Sema+Lowering |
+| SO_REUSEADDR (auto in bind) | ❌ Parser, ❌ Sema, ✅ Runtime |
 
 ---
 
-### Phase 3 — Performance (отложена, месяц 4–6)
+### Phase 2.14 — Socket Builtins & HTTP Server (завершена ✅)
+
+**Цель:** Добавить системные вызовы socket/bind/listen/accept/recv/send/close/connect как builtins, реализовать HTTP сервер.
+
+**Что сделано:**
+
+- ✅ **Socket builtins** — `socket`, `bind`, `listen`, `accept`, `recv`, `send`, `close`, `connect` как builtins
+- ✅ **Buffer-based recv/send** — строка хранит длину в offset 0, данные в offset 8+
+- ✅ **syscall6** — добавлен для `recvfrom` (45) и `sendto` (44), `syscall4` удалён
+- ✅ **exit builtin** — `exit(code: i64) → i64` (через `syscall3(60, ...)`)
+- ✅ **setsockopt builtin** — `setsockopt(fd, level, optname, optval) → i64`
+- ✅ **SO_REUSEADDR автоматически** — `bind()` вызывает `setsockopt(SO_REUSEADDR)` перед биндом
+- ✅ **string_to_sockaddr** — статический буфер `SOCKADDR_BUF` вместо heap alloc
+- ✅ **HTTP сервер** — `while` loop, `accept`/`recv`/`send`, ответ "200 OK"
+- ✅ **Self-test** — `connect`/`accept` цикл с обменом "hello"/"world"
+- ✅ **59 тестов**, clippy clean
+- ✅ **Port 30005** — изменён с 30003 для избежания TIME-WAIT
+
+**Файлы:**
+- `pylang-cranelift/src/lower.rs` — lowering socket/recv/send/bind/connect/exit/setsockopt
+- `pylang-cranelift/src/emit.rs` — exit сигнатура I64
+- `pylang-front/src/sema.rs` — builtin registrations
+- `pylang-runtime/src/lib.rs` — runtime socket/recv/send/bind/connect/exit/setsockopt + syscall6 + SO_REUSEADDR
+
+### Phase 3 — Performance (отложена)
 
 **Oставшиеся unsupported lowering (могут быть добавлены позже):**
 - Lambda expressions
@@ -558,8 +587,6 @@ def foo():
 - Coroutine lowering
 - Custom Lock/Spawn ISLE rules
 - Allocation hoisting, auto-free passes
-
-**Причина:** Phase 3 отложена т.к. базовые Python фичи не работают.
 
 ### Phase 4 — Concurrency (месяц 6–8)
 

@@ -153,6 +153,99 @@ impl Sema {
             ty: Type::Fn { params: vec![], ret: Box::new(Type::Named("str".to_string())) },
             def: NameDef::Function,
         });
+
+        self.names.insert("socket".to_string(), ResolvedName {
+            name: "socket".to_string(),
+            ty: Type::Fn { params: vec![Type::I64, Type::I64, Type::I64], ret: Box::new(Type::I64) },
+            def: NameDef::Function,
+        });
+
+        self.names.insert("bind".to_string(), ResolvedName {
+            name: "bind".to_string(),
+            ty: Type::Fn { params: vec![Type::I64, Type::I64], ret: Box::new(Type::I64) },
+            def: NameDef::Function,
+        });
+
+        self.names.insert("listen".to_string(), ResolvedName {
+            name: "listen".to_string(),
+            ty: Type::Fn { params: vec![Type::I64, Type::I64], ret: Box::new(Type::I64) },
+            def: NameDef::Function,
+        });
+
+        self.names.insert("accept".to_string(), ResolvedName {
+            name: "accept".to_string(),
+            ty: Type::Fn { params: vec![Type::I64], ret: Box::new(Type::I64) },
+            def: NameDef::Function,
+        });
+
+        self.names.insert("recv".to_string(), ResolvedName {
+            name: "recv".to_string(),
+            ty: Type::Fn { params: vec![Type::I64, Type::I64], ret: Box::new(Type::String) },
+            def: NameDef::Function,
+        });
+
+        self.names.insert("recv_string".to_string(), ResolvedName {
+            name: "recv_string".to_string(),
+            ty: Type::Fn { params: vec![Type::I64, Type::I64], ret: Box::new(Type::String) },
+            def: NameDef::Function,
+        });
+
+        self.names.insert("recv_buf_ptr".to_string(), ResolvedName {
+            name: "recv_buf_ptr".to_string(),
+            ty: Type::Fn { params: vec![], ret: Box::new(Type::I64) },
+            def: NameDef::Function,
+        });
+
+        self.names.insert("recv_buf_len".to_string(), ResolvedName {
+            name: "recv_buf_len".to_string(),
+            ty: Type::Fn { params: vec![], ret: Box::new(Type::I64) },
+            def: NameDef::Function,
+        });
+
+        self.names.insert("alloc_copy".to_string(), ResolvedName {
+            name: "alloc_copy".to_string(),
+            ty: Type::Fn { params: vec![Type::I64, Type::I64], ret: Box::new(Type::I64) },
+            def: NameDef::Function,
+        });
+
+        self.names.insert("string_ptr".to_string(), ResolvedName {
+            name: "string_ptr".to_string(),
+            ty: Type::Fn { params: vec![Type::I64], ret: Box::new(Type::I64) },
+            def: NameDef::Function,
+        });
+
+        self.names.insert("string_to_sockaddr".to_string(), ResolvedName {
+            name: "string_to_sockaddr".to_string(),
+            ty: Type::Fn { params: vec![Type::I64, Type::I64], ret: Box::new(Type::I64) },
+            def: NameDef::Function,
+        });
+
+        self.names.insert("send".to_string(), ResolvedName {
+            name: "send".to_string(),
+            ty: Type::Fn { params: vec![Type::I64], ret: Box::new(Type::I64) },
+            def: NameDef::Function,
+        });
+
+        self.names.insert("connect".to_string(), ResolvedName {
+            name: "connect".to_string(),
+            ty: Type::Fn { params: vec![Type::I64, Type::I64, Type::I64], ret: Box::new(Type::I64) },
+            def: NameDef::Function,
+        });
+        self.names.insert("exit".to_string(), ResolvedName {
+            name: "exit".to_string(),
+            ty: Type::Fn { params: vec![Type::I64], ret: Box::new(Type::Unit) },
+            def: NameDef::Function,
+        });
+        self.names.insert("close".to_string(), ResolvedName {
+            name: "close".to_string(),
+            ty: Type::Fn { params: vec![Type::I64], ret: Box::new(Type::I64) },
+            def: NameDef::Function,
+        });
+        self.names.insert("setsockopt".to_string(), ResolvedName {
+            name: "setsockopt".to_string(),
+            ty: Type::Fn { params: vec![Type::I64, Type::I64, Type::I64, Type::I64], ret: Box::new(Type::I64) },
+            def: NameDef::Function,
+        });
     }
 
     pub fn check_module(&mut self, stmts: &[Stmt]) -> Result<(), Vec<SemaError>> {
@@ -520,7 +613,10 @@ impl Sema {
     }
 
     fn is_builtin(name: &str) -> bool {
-        matches!(name, "print" | "len" | "range" | "int" | "str" | "bool" | "float" | "input")
+        matches!(name, "print" | "len" | "range" | "int" | "str" | "bool" | "float" | "input"
+            | "socket" | "bind" | "listen" | "accept" | "recv" | "recv_string" | "send" | "connect" | "exit" | "close"
+            | "recv_buf_ptr" | "recv_buf_len" | "alloc_copy" | "string_ptr" | "string_to_sockaddr"
+            | "setsockopt")
     }
 
     pub fn get_captures(&self, fn_name: &str) -> Vec<String> {

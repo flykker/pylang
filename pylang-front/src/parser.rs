@@ -249,8 +249,8 @@ impl<'src> Parser<'src> {
                     Type::F64
                 } else if name == "bool" {
                     Type::Bool
-                } else if name == "str" {
-                    Type::Named("str".to_string())
+                } else if name == "str" || name == "String" {
+                    Type::String
                 } else if name == "char" {
                     Type::Char
                 } else {

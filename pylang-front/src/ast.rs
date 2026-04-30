@@ -319,6 +319,7 @@ pub enum Type {
     F64,
     Usize,
     Char,
+    String,
     Named(String),
     Class(String),
     Tuple(Vec<Type>),
