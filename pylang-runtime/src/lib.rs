@@ -233,6 +233,52 @@ pub extern "C" fn int_to_str(buf: *mut u8, val: i64) -> i64 {
 }
 
 #[no_mangle]
+pub extern "C" fn dict_new(capacity: i64) -> *mut u8 {
+    let cap = if capacity < 4 { 4 } else { capacity as usize };
+    let size = 16 + cap * 16;
+    let ptr = alloc(size);
+    unsafe {
+        *(ptr as *mut i64) = 0;
+        *((ptr as *mut i64).add(1)) = cap as i64;
+    }
+    ptr
+}
+
+#[no_mangle]
+pub extern "C" fn dict_set(dict: *mut u8, key: i64, val: i64) -> i64 {
+    let num = unsafe { *(dict as *const i64) };
+    let cap = unsafe { *((dict as *const i64).add(1)) };
+    for i in 0..(num as usize) {
+        let k = unsafe { *((dict as *const i64).add(2 + i * 2)) };
+        if k == key {
+            unsafe { *((dict as *mut i64).add(2 + i * 2 + 1)) = val; }
+            return 0;
+        }
+    }
+    if num < cap {
+        unsafe {
+            *((dict as *mut i64).add(2 + num as usize * 2)) = key;
+            *((dict as *mut i64).add(2 + num as usize * 2 + 1)) = val;
+            *(dict as *mut i64) = num + 1;
+        }
+        return 0;
+    }
+    -1
+}
+
+#[no_mangle]
+pub extern "C" fn dict_read(dict: *const u8, key: i64) -> i64 {
+    let num = unsafe { *(dict as *const i64) };
+    for i in 0..(num as usize) {
+        let k = unsafe { *((dict as *const i64).add(2 + i * 2)) };
+        if k == key {
+            return unsafe { *((dict as *const i64).add(2 + i * 2 + 1)) };
+        }
+    }
+    0
+}
+
+#[no_mangle]
 pub extern "C" fn socket(domain: i32, r#type: i32, protocol: i32) -> i32 {
     unsafe { syscall3(41, domain as usize, r#type as usize, protocol as usize) as i32 }
 }

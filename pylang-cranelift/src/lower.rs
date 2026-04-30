@@ -132,6 +132,25 @@ pub fn lower_module(module: &mut dyn Module, stmts: &[Stmt]) -> Result<HashMap<S
                                 format!("{}_{}", c.name, f.name)
                             };
                             methods.insert(f.name.clone(), method_name.clone());
+                            if f.name == "__init__" {
+                                for s in &f.body {
+                                    if let Stmt::Assign(a) = s {
+                                        if let Expr::Dot { obj, name } = &*a.target {
+                                            if let Expr::Ident(sn) = &**obj {
+                                                if sn == "self" && !fields.iter().any(|f| f._name == *name) {
+                                                    fields.push(StructField {
+                                                        _name: name.clone(),
+                                                        offset,
+                                                        _ty: types::I64,
+                                                    });
+                                                    field_defaults.push(0);
+                                                    offset += 8;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                         Stmt::Let(l) => {
                             fields.push(StructField {
@@ -157,6 +176,15 @@ pub fn lower_module(module: &mut dyn Module, stmts: &[Stmt]) -> Result<HashMap<S
                                         offset += 8;
                                     }
                                 }
+                            } else if let Expr::Ident(n) = &*a.target {
+                                fields.push(StructField {
+                                    _name: n.clone(),
+                                    offset,
+                                    _ty: types::I64,
+                                });
+                                let default_val = extract_int_from_expr(&a.val);
+                                field_defaults.push(default_val);
+                                offset += 8;
                             }
                         }
                         _ => {}
@@ -570,22 +598,12 @@ fn lower_stmt(stmt: &Stmt, lctx: &mut LowerCtx) -> Result<(), String> {
                 let addr = lctx.builder.ins().iadd(obj_val, offset_val);
                 lctx.builder.ins().store(MemFlags::trusted(), val, addr, 0);
                 Ok(())
-            } else if let Expr::Subscript(elems) = &*a.target {
-                if elems.len() == 2 {
-                    let obj = lower_expr(&elems[0], lctx)?;
-                    let index = lower_expr(&elems[1], lctx)?;
-                    let val = lower_expr(&a.val, lctx)?;
-                    let eight = lctx.builder.ins().iconst(types::I32, 8);
-                    let index_i32 = lctx.builder.ins().ireduce(types::I32, index);
-                    let index_times_8 = lctx.builder.ins().imul(eight, index_i32);
-                    let offset = lctx.builder.ins().iadd(eight, index_times_8);
-                    let offset_i64 = lctx.builder.ins().uextend(types::I64, offset);
-                    let addr = lctx.builder.ins().iadd(obj, offset_i64);
-                    lctx.builder.ins().store(MemFlags::trusted(), val, addr, 0);
-                    Ok(())
-                } else {
-                    Err("subscript assign requires 2 elements".to_string())
-                }
+            } else if let Expr::Index { obj, idx } = &*a.target {
+                let obj = lower_expr(obj, lctx)?;
+                let index = lower_expr(idx, lctx)?;
+                let val = lower_expr(&a.val, lctx)?;
+                call_runtime(lctx, "dict_set", &[obj, index, val], types::I64)?;
+                Ok(())
             } else {
                 Err("complex assignment not yet supported".to_string())
             }
@@ -726,10 +744,7 @@ fn lower_expr(expr: &Expr, lctx: &mut LowerCtx) -> Result<Value, String> {
         Expr::Index { obj, idx } => {
             let obj_val = lower_expr(obj, lctx)?;
             let idx_val = lower_expr(idx, lctx)?;
-            let scale = lctx.builder.ins().iconst(types::I64, 8);
-            let offset = lctx.builder.ins().imul(idx_val, scale);
-            let addr = lctx.builder.ins().iadd(obj_val, offset);
-            Ok(lctx.builder.ins().load(types::I64, MemFlags::trusted(), addr, 0))
+            Ok(call_runtime(lctx, "dict_read", &[obj_val, idx_val], types::I64)?)
         }
         Expr::Slice { .. } => Err("slice lowering not yet supported".to_string()),
         Expr::Tuple(elems) | Expr::List(elems) | Expr::Set(elems) => {
@@ -752,18 +767,12 @@ fn lower_expr(expr: &Expr, lctx: &mut LowerCtx) -> Result<Value, String> {
             Ok(ptr)
         }
         Expr::Dict(items) => {
-            let size = items.len() * 16;
-            let size_val = lctx.builder.ins().iconst(types::I64, size as i64);
-            let ptr = call_runtime(lctx, "alloc", &[size_val], types::I64)?;
-            for (i, (k, v)) in items.iter().enumerate() {
+            let cap = lctx.builder.ins().iconst(types::I64, items.len() as i64);
+            let ptr = call_runtime(lctx, "dict_new", &[cap], types::I64)?;
+            for (k, v) in items {
                 let k_val = lower_expr(k, lctx)?;
                 let v_val = lower_expr(v, lctx)?;
-                let k_offset = lctx.builder.ins().iconst(types::I64, (i * 16) as i64);
-                let v_offset = lctx.builder.ins().iconst(types::I64, (i * 16 + 8) as i64);
-                let k_addr = lctx.builder.ins().iadd(ptr, k_offset);
-                let v_addr = lctx.builder.ins().iadd(ptr, v_offset);
-                lctx.builder.ins().store(MemFlags::trusted(), k_val, k_addr, 0);
-                lctx.builder.ins().store(MemFlags::trusted(), v_val, v_addr, 0);
+                call_runtime(lctx, "dict_set", &[ptr, k_val, v_val], types::I64)?;
             }
             Ok(ptr)
         }

@@ -138,7 +138,7 @@ impl<'src> Parser<'src> {
             TokenKind::Except | TokenKind::Finally | TokenKind::Eof => Err(ParseError::InvalidSyntax { span: token.span }),
             _ => {
                 let expr = self.parse_expr()?;
-                if self.at(&TokenKind::Eq) && (matches!(&expr, Expr::Ident(_)) || matches!(&expr, Expr::Dot { .. })) {
+                if self.at(&TokenKind::Eq) && (matches!(&expr, Expr::Ident(_)) || matches!(&expr, Expr::Dot { .. }) || matches!(&expr, Expr::Index { .. })) {
                     self.bump();
                     let val = self.parse_expr()?;
                     Ok(Stmt::Assign(Assign { target: Box::new(expr), val }))

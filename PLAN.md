@@ -571,6 +571,27 @@ def foo():
 - `pylang-front/src/sema.rs` — builtin registrations
 - `pylang-runtime/src/lib.rs` — runtime socket/recv/send/bind/connect/exit/setsockopt + syscall6 + SO_REUSEADDR
 
+### Phase 2.16 — Class Field Registration Fix (завершена ✅)
+
+**Цель:** Исправить segfault при `self.d[key] = val` внутри методов класса, когда поля не зарегистрированы в первом проходе.
+
+**Проблема:**
+- `routers = {}` в теле класса парсится как `Stmt::Assign` с `Expr::Ident` target — первый проход его не ловил
+- `self.d = {...}` внутри `__init__` не сканировался → поля не регистрировались
+- Класс аллоцировался с 0 байт → `self.d` читал из `self+0` → segfault
+
+**Исправления в `lower.rs`:**
+- ✅ Добавлена обработка `Stmt::Assign` с `Expr::Ident` target в теле класса → поле регистрируется с `extract_int_from_expr` default
+- ✅ Добавлено сканирование `__init__` body для `self.field =` → поля регистрируются (с дедупликацией через `.any()`)
+
+**Тестирование:**
+- ✅ `test.py` (f-строки + Router класс с dict subscript assign) — работает
+- ✅ `dict_testE/F/G.py` — dict операции внутри методов класса с int-ключами
+- ✅ 59 тестов, clippy clean
+- ✅ ELF smoke test: print(42) → "42"
+
+---
+
 ### Phase 3 — Performance (отложена)
 
 **Oставшиеся unsupported lowering (могут быть добавлены позже):**

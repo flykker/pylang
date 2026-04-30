@@ -33,10 +33,10 @@ class Router:
     def __init__(self):
         self.routers = {}
 
-    def add_route(self, path, endpoint):
+    def add_route(self, path: str, endpoint):
         self.routers[path] = endpoint
 
-        print("Route registered !!!\n")
+        print("Route registered {path} !!!\n")
 
     def post(self, path: str):
         def decorator(func):
@@ -52,7 +52,9 @@ def health():
 
 def main():
     print("Run app ...\n")
-    app = HttpServer()
-    app.run("0.0.0.0", 8080)
 
-    health()
+    router["/health"]()
+    
+    # app = HttpServer()
+    # app.run("0.0.0.0", 8080)
+
