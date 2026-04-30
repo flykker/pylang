@@ -1,9 +1,11 @@
 
 class HttpServer:
     fd = 0
+    routers = {}
 
-    def __init___(self):
+    def __init___(self, routers):
         self.fd = 0
+        self.routers = routers
 
     def run(self, host, port):
         self.fd = socket(2, 1, 0)
@@ -21,11 +23,14 @@ class HttpServer:
             data = recv(conn, 1024)
 
             if len(data) > 0:
-                response = "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nHello World"
+                content = self.routers["/health"]()
+                length = len(content)
+                response = f"HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n{content}\n"
                 send(conn, response)
             close(conn)
 
         close(self.fd)
+
 
 class Router:
     routers = {}
@@ -36,25 +41,31 @@ class Router:
     def add_route(self, path: str, endpoint):
         self.routers[path] = endpoint
 
-        print("Route registered {path} !!!\n")
+        print(f"Route registered {path} !!!\n")
+
+
+class FastPy:
+    def __init__(self):
+        self.router = Router()
+        self.app = HttpServer(self.router.routers)
+
+    def run(self, host: str, port: int):
+        self.app.run("0.0.0.0", 8080)
 
     def post(self, path: str):
         def decorator(func):
-            self.add_route(path, func)
+            self.router.add_route(path, func)
             return func
         return decorator
 
-router = Router()
+app = FastPy()
 
-@router.post("/health")
-def health():
-    print("Health is OK !\n")
+@app.post("/health")
+def health() -> str:
+    print("Log:Main Health is OK !\n")
+    return "{'health':'ok'}"
 
 def main():
     print("Run app ...\n")
-
-    router["/health"]()
-    
-    # app = HttpServer()
-    # app.run("0.0.0.0", 8080)
+    app.run("0.0.0.0", 8080)
 

@@ -590,6 +590,25 @@ def foo():
 - ✅ 59 тестов, clippy clean
 - ✅ ELF smoke test: print(42) → "42"
 
+### Phase 2.17 — Closure ABI Fix (завершена ✅)
+
+**Цель:** Исправить segfault при вызове функции через dict после декоратора: `router.routers["/health"]()`.
+
+**Проблема:**
+- `hoisted_params` в `lower_fn` добавлял `__closure_X` param, дублирующий `closure_ptr`, который `lower_fn_closure` уже добавляет как первый sig-param
+- ABI mismatch: closure функция ожидала 3 params `[closure_ptr, __closure_X, func]`, call site передавал 2 args `[closure_ptr, func_addr]`
+- Параметр `func` получал мусор (значение `8` из неинициализированного регистра) → `dict_set` сохранял `8` вместо адреса функции
+- `dict_read` возвращал `8`, `call_indirect(8, ...)` → segfault
+
+**Исправления в `lower.rs`:**
+- ✅ Убран `hoisted_params` с `__closure_*` — `lower_fn_closure` теперь получает только реальные params (`[func]` вместо `[__closure_X, func]`)
+- ✅ Сигнатура closure: `[closure_ptr, func]` — совпадает с call site
+
+**Тестирование:**
+- ✅ `test.py` (декоратор `@router.post("/health")` + `router.routers["/health"]()`) — выводит "Health is OK !" и exit 0
+- ✅ 59 тестов, clippy clean
+- ✅ ELF smoke test: print(42) → "42"
+
 ---
 
 ### Phase 3 — Performance (отложена)

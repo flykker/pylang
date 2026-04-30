@@ -267,8 +267,21 @@ pub extern "C" fn dict_set(dict: *mut u8, key: i64, val: i64) -> i64 {
 }
 
 #[no_mangle]
+pub extern "C" fn str_copy(dst: *mut u8, src: *const u8) -> i64 {
+    let len = unsafe { *(src as *const i64) };
+    let src_data = unsafe { src.add(8) };
+    let mut i: usize = 0;
+    while i < len as usize {
+        unsafe { dst.add(i).write_volatile(src_data.add(i).read_volatile()) }
+        i += 1;
+    }
+    len
+}
+
+#[no_mangle]
 pub extern "C" fn dict_read(dict: *const u8, key: i64) -> i64 {
     let num = unsafe { *(dict as *const i64) };
+    if !(0i64..=1000000).contains(&num) { return 0; }
     for i in 0..(num as usize) {
         let k = unsafe { *((dict as *const i64).add(2 + i * 2)) };
         if k == key {
