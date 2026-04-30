@@ -138,7 +138,18 @@ impl<'src> Parser<'src> {
             TokenKind::Except | TokenKind::Finally | TokenKind::Eof => Err(ParseError::InvalidSyntax { span: token.span }),
             _ => {
                 let expr = self.parse_expr()?;
-                if self.at(&TokenKind::Eq) && (matches!(&expr, Expr::Ident(_)) || matches!(&expr, Expr::Dot { .. }) || matches!(&expr, Expr::Index { .. })) {
+                if self.at(&TokenKind::Colon) && matches!(&expr, Expr::Ident(_) | Expr::Dot { .. }) {
+                    self.bump();
+                    let ty = self.parse_type()?;
+                    self.expect(TokenKind::Eq)?;
+                    let val = self.parse_expr()?;
+                    if let Expr::Ident(name) = &expr {
+                        Ok(Stmt::AnnAssign(AnnAssign { name: name.clone(), ty, val }))
+                    } else {
+                        // self.field: Type = val → desugar to self.field = val (assign)
+                        Ok(Stmt::Assign(Assign { target: Box::new(expr), val }))
+                    }
+                } else if self.at(&TokenKind::Eq) && (matches!(&expr, Expr::Ident(_)) || matches!(&expr, Expr::Dot { .. }) || matches!(&expr, Expr::Index { .. })) {
                     self.bump();
                     let val = self.parse_expr()?;
                     Ok(Stmt::Assign(Assign { target: Box::new(expr), val }))
@@ -212,8 +223,10 @@ impl<'src> Parser<'src> {
         let ty = if self.at(&TokenKind::Colon) {
             self.bump();
             self.parse_type()?
+        } else if name == "self" {
+            Type::Unit
         } else {
-            Type::Named("int".to_string())
+            return Err(ParseError::UnexpectedToken { expected: "type annotation ':' for parameter", found: name_tok.value.clone(), span: name_tok.span });
         };
         
         let default = if self.at(&TokenKind::Eq) {

@@ -5,7 +5,7 @@ use pylang_front::ast::{
     Stmt, Expr, Type as AstType, BinOp, Fn as AstFn, CmpOp, UnOp, FStringPart,
     If, While, For, Loop, Match, Try, With, Raise, Assert, Yield,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone)]
 struct StructField {
@@ -26,6 +26,7 @@ pub struct ClassInfo {
     _fields: Vec<StructField>,
     field_defaults: Vec<i64>,
     _methods: HashMap<String, String>,
+    field_assign_types: HashMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -49,10 +50,14 @@ pub struct LowerCtx<'a> {
     pub global_vars: HashMap<String, DataId>,
     pub param_types: HashMap<String, AstType>,
     pub block_filled: bool,
-    loop_stack: Vec<LoopContext>,
+    pub loop_stack: Vec<LoopContext>,
     pub struct_defs: HashMap<String, StructInfo>,
     pub class_defs: HashMap<String, ClassInfo>,
     pub string_cache: &'a mut HashMap<Vec<u8>, DataId>,
+    pub current_class: Option<String>,
+    pub global_var_types: &'a HashMap<String, String>,
+    pub string_vars: HashSet<String>,
+    pub fn_ret_types: &'a HashMap<String, AstType>,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -91,13 +96,18 @@ impl<'a> LowerCtx<'a> {
     }
 }
 
-pub fn lower_module(module: &mut dyn Module, stmts: &[Stmt]) -> Result<HashMap<String, FuncId>, String> {
+pub fn lower_module(
+    module: &mut dyn Module,
+    stmts: &[Stmt],
+    fn_var_types: &HashMap<String, HashMap<String, AstType>>,
+) -> Result<HashMap<String, FuncId>, String> {
     let mut struct_defs: HashMap<String, StructInfo> = HashMap::new();
     let mut class_defs: HashMap<String, ClassInfo> = HashMap::new();
     let mut func_ids: HashMap<String, FuncId> = HashMap::new();
     let mut closure_defs: HashMap<String, ClosureInfo> = HashMap::new();
     let mut string_cache: HashMap<Vec<u8>, DataId> = HashMap::new();
-
+    let mut global_var_types: HashMap<String, String> = HashMap::new();
+    
     // First pass: collect all struct and class definitions (without methods)
     for stmt in stmts {
         match stmt {
@@ -191,17 +201,82 @@ pub fn lower_module(module: &mut dyn Module, stmts: &[Stmt]) -> Result<HashMap<S
                         _ => {}
                     }
                 }
+                // Build field_assign_types: detect self.field = ClassName(...) in __init__
+                let mut field_assign_types: HashMap<String, String> = HashMap::new();
+                if let Some(init_fn) = c.body.iter().find_map(|item| {
+                    if let Stmt::Fn(f) = item { if f.name == "__init__" { Some(f) } else { None } } else { None }
+                }) {
+                    for s in &init_fn.body {
+                        if let Stmt::Assign(a) = s {
+                            if let Expr::Dot { obj, name } = &*a.target {
+                                if let Expr::Ident(sn) = &**obj {
+                                    if sn == "self" {
+                                        if let Expr::Call { func, .. } = &a.val {
+                                            if let Expr::Ident(class_name) = func.as_ref() {
+                                                if class_defs.contains_key(class_name) || struct_defs.contains_key(class_name) {
+                                                    field_assign_types.insert(name.clone(), class_name.clone());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
                 class_defs.insert(c.name.clone(), ClassInfo {
                     _name: c.name.clone(),
                     _fields: fields,
                     field_defaults,
                     _methods: methods,
+                    field_assign_types,
                 });
             }
             _ => {}
         }
     }
     
+    // Build global_var_types from module-level assignments (e.g., `app = FastPy()`)
+    for stmt in stmts.iter().filter(|s| !matches!(s, Stmt::Fn(_) | Stmt::Class(_) | Stmt::Struct(_))) {
+        if let Stmt::Assign(a) = stmt {
+            if let Expr::Ident(name) = &*a.target {
+                if let Expr::Call { func, .. } = &a.val {
+                    if let Expr::Ident(class_name) = func.as_ref() {
+                        if class_defs.contains_key(class_name) || struct_defs.contains_key(class_name) {
+                            global_var_types.insert(name.clone(), class_name.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Build fn_ret_types from module-level function definitions
+    let mut fn_ret_types: HashMap<String, AstType> = HashMap::new();
+    for stmt in stmts {
+        match stmt {
+            Stmt::Fn(f) => {
+                let ret_ty = f.ret.clone().unwrap_or(AstType::Unit);
+                fn_ret_types.insert(f.name.clone(), ret_ty);
+            }
+            Stmt::Class(c) => {
+                for item in &c.body {
+                    if let Stmt::Fn(f) = item {
+                        let method_name = if f.name == "__init__" {
+                            format!("{}_init", c.name)
+                        } else {
+                            format!("{}_{}", c.name, f.name)
+                        };
+                        let ret_ty = f.ret.clone().unwrap_or(AstType::Unit);
+                        fn_ret_types.insert(method_name, ret_ty);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     // Zero pass: collect module-level variable names and declare global data objects
     let module_stmts: Vec<Stmt> = stmts.iter().filter(|s| {
         !matches!(s, Stmt::Fn(_) | Stmt::Class(_) | Stmt::Struct(_))
@@ -248,13 +323,19 @@ pub fn lower_module(module: &mut dyn Module, stmts: &[Stmt]) -> Result<HashMap<S
                         };
                         
                         let has_self = f.params.first().map(|p| p.name == "self").unwrap_or(false);
-                        let params = if has_self {
-                            f.params.clone()
+                        let params: Vec<pylang_front::ast::Param> = if has_self {
+                            f.params.iter().map(|p| {
+                                let mut p2 = p.clone();
+                                if p.name == "self" {
+                                    p2.ty = pylang_front::ast::Type::I64;
+                                }
+                                p2
+                            }).collect()
                         } else {
                             let mut p = vec![
                                 pylang_front::ast::Param {
                                     name: "self".to_string(),
-                                    ty: pylang_front::ast::Type::Named(c.name.clone()),
+                                    ty: pylang_front::ast::Type::I64,
                                     default: None,
                                 }
                             ];
@@ -270,15 +351,13 @@ pub fn lower_module(module: &mut dyn Module, stmts: &[Stmt]) -> Result<HashMap<S
                             decorators: vec![],
                             captures: vec![],
                         };
-                        let id = lower_fn(module, &method_fn, &struct_defs, &class_defs, &mut func_ids, &mut closure_defs, &global_vars, &mut string_cache)?;
+                        let id = lower_fn_inner(module, &method_fn, &struct_defs, &class_defs, &mut func_ids, &mut closure_defs, &global_vars, &mut string_cache, Some(&c.name), &global_var_types, &fn_ret_types, fn_var_types)?;
                         func_ids.insert(method_name, id);
                     }
                 }
             }
             Stmt::Fn(f) => {
-                
-                let id = lower_fn(module, f, &struct_defs, &class_defs, &mut func_ids, &mut closure_defs, &global_vars, &mut string_cache)?;
-                
+                let id = lower_fn_inner(module, f, &struct_defs, &class_defs, &mut func_ids, &mut closure_defs, &global_vars, &mut string_cache, None, &global_var_types, &fn_ret_types, fn_var_types)?;
                 func_ids.insert(f.name.clone(), id);
             }
             _ => {}
@@ -287,7 +366,7 @@ pub fn lower_module(module: &mut dyn Module, stmts: &[Stmt]) -> Result<HashMap<S
     
     // Third pass: lower module-level non-function statements (decorator desugaring, etc.)
     if !module_stmts.is_empty() {
-        let init_id = lower_module_init(module, &module_stmts, &struct_defs, &class_defs, &mut func_ids, &mut closure_defs, &global_vars, &mut string_cache)?;
+        let init_id = lower_module_init(module, &module_stmts, &struct_defs, &class_defs, &mut func_ids, &mut closure_defs, &global_vars, &mut string_cache, &global_var_types, &fn_ret_types, fn_var_types)?;
         func_ids.insert("_init_module".to_string(), init_id);
     }
     
@@ -304,6 +383,9 @@ fn lower_module_init(
     closure_defs: &mut HashMap<String, ClosureInfo>,
     global_vars: &HashMap<String, DataId>,
     string_cache: &mut HashMap<Vec<u8>, DataId>,
+    global_var_types: &HashMap<String, String>,
+    fn_ret_types: &HashMap<String, AstType>,
+    fn_var_types: &HashMap<String, HashMap<String, AstType>>,
 ) -> Result<FuncId, String> {
     let init_fn = pylang_front::ast::Fn {
         name: "_init_module".to_string(),
@@ -313,7 +395,7 @@ fn lower_module_init(
         decorators: vec![],
         captures: vec![],
     };
-    lower_fn(module, &init_fn, struct_defs, class_defs, func_ids, closure_defs, global_vars, string_cache)
+    lower_fn_inner(module, &init_fn, struct_defs, class_defs, func_ids, closure_defs, global_vars, string_cache, None, global_var_types, fn_ret_types, fn_var_types)
 }
 
 
@@ -328,7 +410,29 @@ pub fn lower_fn(
     closure_defs: &mut HashMap<String, ClosureInfo>,
     global_vars: &HashMap<String, DataId>,
     string_cache: &mut HashMap<Vec<u8>, DataId>,
+    fn_ret_types: &HashMap<String, AstType>,
+    fn_var_types: &HashMap<String, HashMap<String, AstType>>,
 ) -> Result<FuncId, String> {
+    let empty_types = HashMap::new();
+    lower_fn_inner(module, f, struct_defs, class_defs, func_ids, closure_defs, global_vars, string_cache, None, &empty_types, fn_ret_types, fn_var_types)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_fn_inner(
+    module: &mut dyn Module,
+    f: &AstFn,
+    struct_defs: &HashMap<String, StructInfo>,
+    class_defs: &HashMap<String, ClassInfo>,
+    func_ids: &mut HashMap<String, FuncId>,
+    closure_defs: &mut HashMap<String, ClosureInfo>,
+    global_vars: &HashMap<String, DataId>,
+    string_cache: &mut HashMap<Vec<u8>, DataId>,
+    class_name: Option<&str>,
+    global_var_types: &HashMap<String, String>,
+    fn_ret_types: &HashMap<String, AstType>,
+    fn_var_types: &HashMap<String, HashMap<String, AstType>>,
+) -> Result<FuncId, String> {
+
     // Pre-pass: find nested functions and hoist them to module level
     for stmt in &f.body {
         if let Stmt::Fn(nested) = stmt {
@@ -347,7 +451,7 @@ pub fn lower_fn(
             };
             let nested_id = lower_fn_closure(
                 module, &hoisted_fn, &nested.captures,
-                struct_defs, class_defs, func_ids, closure_defs, global_vars, string_cache,
+                struct_defs, class_defs, func_ids, closure_defs, global_vars, string_cache, global_var_types, fn_ret_types, fn_var_types,
             )?;
             func_ids.insert(mangled_name.clone(), nested_id);
             closure_defs.insert(nested.name.clone(), ClosureInfo {
@@ -411,6 +515,8 @@ pub fn lower_fn(
         param_types.insert(param.name.clone(), param.ty.clone());
     }
 
+    let string_vars = collect_string_vars(&f.body, fn_ret_types, fn_var_types);
+    
     let mut lctx = LowerCtx {
         builder,
         module,
@@ -424,6 +530,10 @@ pub fn lower_fn(
         struct_defs: struct_defs.clone(),
         class_defs: class_defs.clone(),
         string_cache,
+        current_class: class_name.map(|s| s.to_string()),
+        global_var_types,
+        string_vars,
+        fn_ret_types,
     };
 
     for stmt in &f.body {
@@ -462,6 +572,9 @@ fn lower_fn_closure(
     closure_defs: &mut HashMap<String, ClosureInfo>,
     global_vars: &HashMap<String, DataId>,
     string_cache: &mut HashMap<Vec<u8>, DataId>,
+    global_var_types: &HashMap<String, String>,
+    fn_ret_types: &HashMap<String, AstType>,
+    fn_var_types: &HashMap<String, HashMap<String, AstType>>,
 ) -> Result<FuncId, String> {
     // Hoisted function signature: (closure_ptr: i64, actual_params...) -> ret
     let mut sig = module.make_signature();
@@ -533,6 +646,8 @@ fn lower_fn_closure(
         param_types.insert(param.name.clone(), param.ty.clone());
     }
 
+    let string_vars = collect_string_vars(&f.body, fn_ret_types, fn_var_types);
+
     let mut lctx = LowerCtx {
         builder,
         module,
@@ -546,6 +661,10 @@ fn lower_fn_closure(
         struct_defs: struct_defs.clone(),
         class_defs: class_defs.clone(),
         string_cache,
+        current_class: None,
+        global_var_types,
+        string_vars,
+        fn_ret_types,
     };
 
     for stmt in &f.body {
@@ -594,6 +713,7 @@ fn clif_type(ty: &AstType) -> Result<Type, String> {
         AstType::Named(n) if n == "bool" => Ok(types::I8),
         AstType::Named(n) if n == "str" => Ok(types::I64),
         AstType::Named(_) => Ok(types::I64),
+        AstType::Generic { .. } => Ok(types::I64),
         _ => Err(format!("unsupported type: {:?}", ty)),
     }
 }
@@ -610,9 +730,16 @@ fn lower_stmt(stmt: &Stmt, lctx: &mut LowerCtx) -> Result<(), String> {
     match stmt {
         Stmt::Let(l) => {
             let val = lower_expr(&l.val, lctx)?;
-            let var = lctx.builder.declare_var(lctx.builder.func.dfg.value_type(val));
-            lctx.builder.def_var(var, val);
-            lctx.locals.insert(l.name.clone(), var);
+            if lctx.global_vars.contains_key(&l.name) {
+                let &data_id = lctx.global_vars.get(&l.name).unwrap();
+                let data_ref = lctx.module.declare_data_in_func(data_id, lctx.builder.func);
+                let global_addr = lctx.builder.ins().symbol_value(types::I64, data_ref);
+                lctx.builder.ins().store(MemFlags::trusted(), val, global_addr, 0);
+            } else {
+                let var = lctx.builder.declare_var(lctx.builder.func.dfg.value_type(val));
+                lctx.builder.def_var(var, val);
+                lctx.locals.insert(l.name.clone(), var);
+            }
             Ok(())
         }
         Stmt::LetMut(l) => {
@@ -643,7 +770,7 @@ fn lower_stmt(stmt: &Stmt, lctx: &mut LowerCtx) -> Result<(), String> {
             } else if let Expr::Dot { obj, name } = &*a.target {
                 let obj_val = lower_expr(obj, lctx)?;
                 let val = lower_expr(&a.val, lctx)?;
-                let offset = get_field_offset(lctx, name);
+                let offset = resolve_dot_field_offset(obj, name, lctx);
                 let offset_val = lctx.builder.ins().iconst(types::I64, offset);
                 let addr = lctx.builder.ins().iadd(obj_val, offset_val);
                 lctx.builder.ins().store(MemFlags::trusted(), val, addr, 0);
@@ -788,7 +915,7 @@ fn lower_expr(expr: &Expr, lctx: &mut LowerCtx) -> Result<Value, String> {
         Expr::Method { obj, name, args } => lower_method(obj, name, args, lctx),
         Expr::Dot { obj, name } => {
             let obj_val = lower_expr(obj, lctx)?;
-            let offset = get_field_offset(lctx, name);
+            let offset = resolve_dot_field_offset(obj, name, lctx);
             let offset_val = lctx.builder.ins().iconst(types::I64, offset);
             let addr = lctx.builder.ins().iadd(obj_val, offset_val);
             Ok(lctx.builder.ins().load(types::I64, MemFlags::trusted(), addr, 0))
@@ -955,11 +1082,14 @@ fn lower_call(func: &Expr, args: &[Expr], lctx: &mut LowerCtx) -> Result<Value, 
                                 }
                                 FStringPart::Expr(e) => {
                                     let e_val = lower_expr(e, lctx)?;
-                                    if matches!(&**e, Expr::Ident(n) if lctx.param_types.get(n) == Some(&AstType::String)) {
+                                    let is_known_str = matches!(&**e, Expr::Ident(n) if lctx.param_types.get(n) == Some(&AstType::String) || lctx.string_vars.contains(n));
+                                    if is_known_str {
                                         let len = lctx.builder.ins().load(types::I64, MemFlags::trusted(), e_val, 0);
                                         let eight = lctx.builder.ins().iconst(types::I64, 8);
                                         let data_ptr = lctx.builder.ins().iadd(e_val, eight);
                                         call_runtime(lctx, "print_str", &[data_ptr, len], types::I64)?;
+                                    } else if matches!(&**e, Expr::Ident(_)) {
+                                        print_str_or_int(lctx, e_val)?;
                                     } else {
                                         call_runtime(lctx, "print_int_raw", &[e_val], types::I64)?;
                                     }
@@ -971,6 +1101,15 @@ fn lower_call(func: &Expr, args: &[Expr], lctx: &mut LowerCtx) -> Result<Value, 
                         let data_ptr = lctx.builder.ins().iadd(val, eight);
                         let len = lctx.builder.ins().iconst(types::I64, s.len() as i64);
                         call_runtime(lctx, "print_str", &[data_ptr, len], types::I64)?;
+                    } else if let Some(Expr::Ident(name)) = args.first() {
+                        if lctx.param_types.get(name) == Some(&AstType::String) || lctx.string_vars.contains(name) {
+                            let len = lctx.builder.ins().load(types::I64, MemFlags::trusted(), val, 0);
+                            let eight = lctx.builder.ins().iconst(types::I64, 8);
+                            let data_ptr = lctx.builder.ins().iadd(val, eight);
+                            call_runtime(lctx, "print_str", &[data_ptr, len], types::I64)?;
+                        } else {
+                            call_runtime(lctx, "print_int", &[val], types::I64)?;
+                        }
                     } else {
                         call_runtime(lctx, "print_int", &[val], types::I64)?;
                     }
@@ -1312,23 +1451,8 @@ fn lower_call(func: &Expr, args: &[Expr], lctx: &mut LowerCtx) -> Result<Value, 
 fn lower_method(obj: &Expr, method_name: &str, args: &[Expr], lctx: &mut LowerCtx) -> Result<Value, String> {
     let obj_val = lower_expr(obj, lctx)?;
     
-    let class_type = match obj {
-        Expr::Ident(name) => name.clone(),
-        _ => String::new(),
-    };
-    
-    let full_method_name = if let Some(class_info) = lctx.class_defs.get(&class_type) {
-        class_info._methods.get(method_name).cloned().unwrap_or_else(|| method_name.to_string())
-    } else {
-        let mut found = None;
-        for class_info in lctx.class_defs.values() {
-            if let Some(m) = class_info._methods.get(method_name) {
-                found = Some(m.clone());
-                break;
-            }
-        }
-        found.unwrap_or_else(|| method_name.to_string())
-    };
+    // Try to resolve the full method name based on the object expression
+    let full_method_name = resolve_method_name(obj, method_name, lctx, lctx.global_var_types);
     
     let mut arg_vals = vec![obj_val];
     for arg in args {
@@ -1364,6 +1488,68 @@ fn lower_method(obj: &Expr, method_name: &str, args: &[Expr], lctx: &mut LowerCt
         Ok(lctx.builder.ins().iconst(types::I64, 0))
     } else {
         Ok(results[0])
+    }
+}
+
+fn resolve_method_name(obj: &Expr, method_name: &str, lctx: &LowerCtx, global_var_types: &HashMap<String, String>) -> String {
+    match obj {
+        Expr::Ident(name) => {
+            if let Some(class_info) = lctx.class_defs.get(name) {
+                return class_info._methods.get(method_name).cloned().unwrap_or_else(|| method_name.to_string());
+            }
+            // Check if name is a global variable with known class type
+            if let Some(var_class) = global_var_types.get(name) {
+                if let Some(class_info) = lctx.class_defs.get(var_class) {
+                    if let Some(m) = class_info._methods.get(method_name) {
+                        return m.clone();
+                    }
+                }
+            }
+            // Search all classes for the method name
+            let mut candidates: Vec<String> = Vec::new();
+            for class_info in lctx.class_defs.values() {
+                if let Some(m) = class_info._methods.get(method_name) {
+                    candidates.push(m.clone());
+                }
+            }
+            if candidates.len() == 1 {
+                return candidates[0].clone();
+            }
+            if candidates.len() > 1 {
+                if let Some(ref cc) = lctx.current_class {
+                    let cc_prefix = format!("{}_", cc);
+                    if let Some(c) = candidates.iter().find(|c| !c.starts_with(&cc_prefix)) {
+                        return c.clone();
+                    }
+                }
+            }
+            candidates.first().cloned().unwrap_or_else(|| method_name.to_string())
+        }
+        Expr::Dot { obj: inner, name: field_name } => {
+            if let Expr::Ident(s) = inner.as_ref() {
+                if s == "self" {
+                    if let Some(ref current_class) = lctx.current_class {
+                        if let Some(class_info) = lctx.class_defs.get(current_class) {
+                            if let Some(target_class) = class_info.field_assign_types.get(field_name) {
+                                if let Some(target_info) = lctx.class_defs.get(target_class) {
+                                    if let Some(m) = target_info._methods.get(method_name) {
+                                        return m.clone();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Fallback: search all classes
+            for class_info in lctx.class_defs.values() {
+                if let Some(m) = class_info._methods.get(method_name) {
+                    return m.clone();
+                }
+            }
+            method_name.to_string()
+        }
+        _ => method_name.to_string(),
     }
 }
 
@@ -1445,11 +1631,16 @@ fn lower_fstring(lctx: &mut LowerCtx, parts: &[FStringPart]) -> Result<Value, St
             FStringPart::Expr(e) => {
                 let val = lower_expr(e, lctx)?;
                 let buf = lctx.builder.ins().iadd(ptr, offset);
-                let is_str_expr = matches!(&**e, Expr::Ident(n) if lctx.param_types.get(n) == Some(&AstType::String));
-                let written = if is_str_expr {
-                    call_runtime(lctx, "str_copy", &[buf, val], types::I64)?
-                } else {
-                    call_runtime(lctx, "int_to_str", &[buf, val], types::I64)?
+                let written = match &**e {
+                    Expr::Ident(n) if lctx.param_types.get(n) == Some(&AstType::String) || lctx.string_vars.contains(n) => {
+                        call_runtime(lctx, "str_copy", &[buf, val], types::I64)?
+                    }
+                    Expr::Ident(_) => {
+                        append_str_or_int(lctx, buf, val)?
+                    }
+                    _ => {
+                        call_runtime(lctx, "int_to_str", &[buf, val], types::I64)?
+                    }
                 };
                 offset = lctx.builder.ins().iadd(offset, written);
             }
@@ -1460,6 +1651,165 @@ fn lower_fstring(lctx: &mut LowerCtx, parts: &[FStringPart]) -> Result<Value, St
     lctx.builder.ins().store(MemFlags::trusted(), final_len, ptr, 0);
 
     Ok(ptr)
+}
+
+/// Runtime branch: if val looks like a string pointer (> 10B), use str_copy;
+/// otherwise convert the int to decimal via int_to_str.
+fn append_str_or_int(lctx: &mut LowerCtx, buf: Value, val: Value) -> Result<Value, String> {
+    let threshold = lctx.builder.ins().iconst(types::I64, 10_000_000_000i64);
+    let is_ptr = lctx.builder.ins().icmp(IntCC::UnsignedGreaterThan, val, threshold);
+
+    let str_block = lctx.create_block();
+    let int_block = lctx.create_block();
+    let merge_block = lctx.create_block();
+
+    lctx.builder.append_block_param(merge_block, types::I64);
+    lctx.builder.ins().brif(is_ptr, str_block, &[], int_block, &[]);
+
+    lctx.switch_to_block(str_block);
+    let written_s = call_runtime(lctx, "str_copy", &[buf, val], types::I64)?;
+    lctx.builder.ins().jump(merge_block, &[BlockArg::Value(written_s)]);
+    lctx.builder.seal_block(str_block);
+
+    lctx.switch_to_block(int_block);
+    let written_i = call_runtime(lctx, "int_to_str", &[buf, val], types::I64)?;
+    lctx.builder.ins().jump(merge_block, &[BlockArg::Value(written_i)]);
+    lctx.builder.seal_block(int_block);
+
+    lctx.switch_to_block(merge_block);
+    lctx.builder.seal_block(merge_block);
+    Ok(lctx.builder.block_params(merge_block)[0])
+}
+
+/// Runtime branch for print(f"...") fast-path.
+fn print_str_or_int(lctx: &mut LowerCtx, val: Value) -> Result<(), String> {
+    let threshold = lctx.builder.ins().iconst(types::I64, 10_000_000_000i64);
+    let is_ptr = lctx.builder.ins().icmp(IntCC::UnsignedGreaterThan, val, threshold);
+
+    let str_block = lctx.create_block();
+    let int_block = lctx.create_block();
+    let merge_block = lctx.create_block();
+
+    lctx.builder.ins().brif(is_ptr, str_block, &[], int_block, &[]);
+
+    lctx.switch_to_block(str_block);
+    let len = lctx.builder.ins().load(types::I64, MemFlags::trusted(), val, 0);
+    let eight = lctx.builder.ins().iconst(types::I64, 8);
+    let data_ptr = lctx.builder.ins().iadd(val, eight);
+    call_runtime(lctx, "print_str", &[data_ptr, len], types::I64)?;
+    lctx.builder.ins().jump(merge_block, &[]);
+    lctx.builder.seal_block(str_block);
+
+    lctx.switch_to_block(int_block);
+    call_runtime(lctx, "print_int_raw", &[val], types::I64)?;
+    lctx.builder.ins().jump(merge_block, &[]);
+    lctx.builder.seal_block(int_block);
+
+    lctx.switch_to_block(merge_block);
+    lctx.builder.seal_block(merge_block);
+    Ok(())
+}
+
+fn resolve_dot_field_offset(obj: &Expr, field_name: &str, lctx: &LowerCtx) -> i64 {
+    // Try to determine the class of `obj` by tracing through Dot chains and Ident("self")
+    let class_opt = trace_obj_class(obj, lctx);
+    get_field_offset_for_class(lctx, field_name, class_opt.as_deref())
+}
+
+fn trace_obj_class(obj: &Expr, lctx: &LowerCtx) -> Option<String> {
+    match obj {
+        Expr::Ident(name) => {
+            if name == "self" {
+                lctx.current_class.clone()
+            } else {
+                None
+            }
+        }
+        Expr::Dot { obj: inner, name: field_name } => {
+            let base_class = trace_obj_class(inner, lctx)?;
+            // Find the type of this field from the base class's field_assign_types
+            let class_info = lctx.class_defs.get(&base_class)?;
+            class_info.field_assign_types.get(field_name).cloned()
+        }
+        _ => None,
+    }
+}
+
+fn get_field_offset_for_class(lctx: &LowerCtx, field_name: &str, class_name: Option<&str>) -> i64 {
+    // First check the specific class if provided
+    if let Some(cn) = class_name {
+        if let Some(class_info) = lctx.class_defs.get(cn) {
+            for field in &class_info._fields {
+                if field._name == field_name {
+                    return field.offset;
+                }
+            }
+        }
+    }
+    // Fallback to global search
+    get_field_offset(lctx, field_name)
+}
+
+fn collect_string_vars(
+    body: &[Stmt],
+    fn_ret_types: &HashMap<String, AstType>,
+    fn_var_types: &HashMap<String, HashMap<String, AstType>>,
+) -> HashSet<String> {
+    let mut sv = HashSet::new();
+    for stmt in body {
+        match stmt {
+            Stmt::Assign(a) => {
+                if let Expr::Ident(name) = &*a.target {
+                    if is_expr_known_string(&a.val, fn_ret_types, fn_var_types) {
+                        sv.insert(name.clone());
+                    }
+                }
+            }
+            Stmt::AnnAssign(a) => {
+                if is_expr_known_string(&a.val, fn_ret_types, fn_var_types) {
+                    sv.insert(a.name.clone());
+                }
+            }
+            Stmt::Let(l) => {
+                if is_expr_known_string(&l.val, fn_ret_types, fn_var_types) {
+                    sv.insert(l.name.clone());
+                }
+            }
+            Stmt::LetMut(l) => {
+                if is_expr_known_string(&l.val, fn_ret_types, fn_var_types) {
+                    sv.insert(l.name.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    sv
+}
+
+fn is_expr_known_string(
+    e: &Expr,
+    fn_ret_types: &HashMap<String, AstType>,
+    fn_var_types: &HashMap<String, HashMap<String, AstType>>,
+) -> bool {
+    match e {
+        Expr::Str(_) | Expr::FString(_) => true,
+        Expr::Call { func, .. } => {
+            if let Expr::Ident(name) = func.as_ref() {
+                fn_ret_types.get(name) == Some(&AstType::String)
+            } else {
+                false
+            }
+        }
+        Expr::Ident(name) => {
+            for (_fn_name, vars) in fn_var_types.iter() {
+                if vars.get(name) == Some(&AstType::String) {
+                    return true;
+                }
+            }
+            false
+        }
+        _ => false,
+    }
 }
 
 fn get_field_offset(lctx: &LowerCtx, field_name: &str) -> i64 {
@@ -1787,7 +2137,8 @@ mod tests {
         let mut func_ids = HashMap::new();
         let mut closure_defs = HashMap::new();
         let mut string_cache = HashMap::new();
-        let result = lower_fn(&mut module, &func, &HashMap::new(), &HashMap::new(), &mut func_ids, &mut closure_defs, &HashMap::new(), &mut string_cache);
+        let fn_var_types: HashMap<String, HashMap<String, AstType>> = HashMap::new();
+        let result = lower_fn(&mut module, &func, &HashMap::new(), &HashMap::new(), &mut func_ids, &mut closure_defs, &HashMap::new(), &mut string_cache, &HashMap::new(), &fn_var_types);
         assert!(result.is_ok(), "lower_fn failed: {:?}", result.err());
     }
 
@@ -1815,7 +2166,8 @@ mod tests {
         let mut func_ids = HashMap::new();
         let mut closure_defs = HashMap::new();
         let mut string_cache = HashMap::new();
-        let result = lower_fn(&mut module, &func, &HashMap::new(), &HashMap::new(), &mut func_ids, &mut closure_defs, &HashMap::new(), &mut string_cache);
+        let fn_var_types: HashMap<String, HashMap<String, AstType>> = HashMap::new();
+        let result = lower_fn(&mut module, &func, &HashMap::new(), &HashMap::new(), &mut func_ids, &mut closure_defs, &HashMap::new(), &mut string_cache, &HashMap::new(), &fn_var_types);
         assert!(result.is_ok(), "lower_fn with if failed: {:?}", result.err());
     }
 
@@ -1838,7 +2190,8 @@ mod tests {
         let mut func_ids = HashMap::new();
         let mut closure_defs = HashMap::new();
         let mut string_cache = HashMap::new();
-        let result = lower_fn(&mut module, &func, &HashMap::new(), &HashMap::new(), &mut func_ids, &mut closure_defs, &HashMap::new(), &mut string_cache);
+        let fn_var_types: HashMap<String, HashMap<String, AstType>> = HashMap::new();
+        let result = lower_fn(&mut module, &func, &HashMap::new(), &HashMap::new(), &mut func_ids, &mut closure_defs, &HashMap::new(), &mut string_cache, &HashMap::new(), &fn_var_types);
         assert!(result.is_ok(), "lower_fn with while failed: {:?}", result.err());
     }
 
@@ -1862,7 +2215,8 @@ mod tests {
         let mut func_ids = HashMap::new();
         let mut closure_defs = HashMap::new();
         let mut string_cache = HashMap::new();
-        let result = lower_fn(&mut module, &func, &HashMap::new(), &HashMap::new(), &mut func_ids, &mut closure_defs, &HashMap::new(), &mut string_cache);
+        let fn_var_types: HashMap<String, HashMap<String, AstType>> = HashMap::new();
+        let result = lower_fn(&mut module, &func, &HashMap::new(), &HashMap::new(), &mut func_ids, &mut closure_defs, &HashMap::new(), &mut string_cache, &HashMap::new(), &fn_var_types);
         assert!(result.is_ok(), "lower_fn with add failed: {:?}", result.err());
     }
 
@@ -1900,7 +2254,8 @@ mod tests {
         let mut func_ids = HashMap::new();
         let mut closure_defs = HashMap::new();
         let mut string_cache = HashMap::new();
-        let result = lower_fn(&mut module, &func, &struct_defs, &HashMap::new(), &mut func_ids, &mut closure_defs, &HashMap::new(), &mut string_cache);
+        let fn_var_types: HashMap<String, HashMap<String, AstType>> = HashMap::new();
+        let result = lower_fn(&mut module, &func, &struct_defs, &HashMap::new(), &mut func_ids, &mut closure_defs, &HashMap::new(), &mut string_cache, &HashMap::new(), &fn_var_types);
         assert!(result.is_ok(), "lower_fn with struct failed: {:?}", result.err());
     }
 }

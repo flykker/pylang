@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use cranelift::prelude::types;
@@ -5,17 +6,21 @@ use cranelift::prelude::*;
 use cranelift_codegen::{settings, ir::UserFuncName};
 use cranelift_module::{Module as ClifModule, Linkage};
 use cranelift_object::{ObjectModule, ObjectBuilder};
-use pylang_front::ast::Stmt;
+use pylang_front::ast::{Stmt, Type as AstType};
 
 use crate::lower::lower_module;
 
-pub fn write_simple_elf(output: &Path, ast: &[Stmt]) -> Result<(), String> {
+pub fn write_simple_elf(
+    output: &Path,
+    ast: &[Stmt],
+    fn_var_types: &HashMap<String, HashMap<String, AstType>>,
+) -> Result<(), String> {
     let runtime_o = compile_runtime_lib()?;
     
     let mut module = create_module()?;
     
     // Lower all Python functions to CLIF via the new lowering pipeline
-    let func_ids = lower_module(&mut module, ast)?;
+    let func_ids = lower_module(&mut module, ast, fn_var_types)?;
     
     // Ensure main exists — if not, create an empty one
     let _main_fn = ast.iter().find(|s| matches!(s, Stmt::Fn(f) if f.name == "main"));
@@ -171,7 +176,8 @@ mod tests {
             decorators: vec![],
             captures: vec![],
         })];
-        let result = write_simple_elf(output, &ast);
+        let empty_map = HashMap::new();
+        let result = write_simple_elf(output, &ast, &empty_map);
         if let Err(ref e) = result {
             eprintln!("test_write_elf error: {}", e);
         }

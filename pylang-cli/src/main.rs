@@ -54,6 +54,10 @@ fn main() -> Result<()> {
                 sema.fill_module_captures(&mut ast);
             }
             
+            // Collect variable type info from sema for lowering
+            let fn_var_types: std::collections::HashMap<String, std::collections::HashMap<String, pylang_front::ast::Type>> =
+                sema.fn_var_types.clone();
+            
             if let Some(emit) = &args.emit {
                 match emit.as_str() {
                     "ast" => {
@@ -75,7 +79,12 @@ fn main() -> Result<()> {
             } else {
                 println!("Compiling to ELF...");
                 let compiler = Compiler::new();
-                match compiler.compile_to_elf(&ast, &args.output) {
+                let result = if args.no_sema {
+                    compiler.compile_to_elf(&ast, &args.output)
+                } else {
+                    compiler.compile_to_elf_with_types(&ast, &args.output, &fn_var_types)
+                };
+                match result {
                     Ok(()) => {
                         println!("Compiled to ELF: {}", args.output);
                     }

@@ -1,6 +1,93 @@
 use crate::ast::{Expr, Stmt};
 
 pub fn desugar_decorators(stmts: Vec<Stmt>) -> Vec<Stmt> {
+    let result = desugar_ann_assigns(stmts);
+    desugar_decorators_inner(result)
+}
+
+fn desugar_ann_assigns(stmts: Vec<Stmt>) -> Vec<Stmt> {
+    stmts.into_iter().map(|stmt| {
+        match stmt {
+            Stmt::AnnAssign(a) => {
+                Stmt::Let(crate::ast::Let {
+                    name: a.name,
+                    ty: Some(a.ty),
+                    val: a.val,
+                })
+            }
+            Stmt::Fn(f) => {
+                Stmt::Fn(crate::ast::Fn {
+                    body: desugar_ann_assigns(f.body),
+                    ..f
+                })
+            }
+            Stmt::Class(c) => {
+                Stmt::Class(crate::ast::Class {
+                    body: desugar_ann_assigns(c.body),
+                    ..c
+                })
+            }
+            Stmt::If(i) => {
+                Stmt::If(crate::ast::If {
+                    then: desugar_ann_assigns(i.then),
+                    elif: i.elif.into_iter().map(|e| crate::ast::Elif {
+                        body: desugar_ann_assigns(e.body),
+                        ..e
+                    }).collect(),
+                    else_: i.else_.map(desugar_ann_assigns),
+                    ..i
+                })
+            }
+            Stmt::While(w) => {
+                Stmt::While(crate::ast::While {
+                    body: desugar_ann_assigns(w.body),
+                    ..w
+                })
+            }
+            Stmt::For(f) => {
+                Stmt::For(crate::ast::For {
+                    body: desugar_ann_assigns(f.body),
+                    ..f
+                })
+            }
+            Stmt::Loop(l) => {
+                Stmt::Loop(crate::ast::Loop {
+                    body: desugar_ann_assigns(l.body),
+                    ..l
+                })
+            }
+            Stmt::Match(m) => {
+                Stmt::Match(crate::ast::Match {
+                    arms: m.arms.into_iter().map(|a| crate::ast::MatchArm {
+                        body: desugar_ann_assigns(a.body),
+                        ..a
+                    }).collect(),
+                    ..m
+                })
+            }
+            Stmt::Try(t) => {
+                Stmt::Try(crate::ast::Try {
+                    body: desugar_ann_assigns(t.body),
+                    handlers: t.handlers.into_iter().map(|h| crate::ast::Handler {
+                        body: desugar_ann_assigns(h.body),
+                        ..h
+                    }).collect(),
+                    finally: t.finally.map(desugar_ann_assigns),
+                    ..t
+                })
+            }
+            Stmt::With(w) => {
+                Stmt::With(crate::ast::With {
+                    body: desugar_ann_assigns(w.body),
+                    ..w
+                })
+            }
+            _ => stmt,
+        }
+    }).collect()
+}
+
+fn desugar_decorators_inner(stmts: Vec<Stmt>) -> Vec<Stmt> {
     let mut result = Vec::new();
     for stmt in stmts {
         match stmt {

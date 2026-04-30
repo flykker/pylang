@@ -36,6 +36,7 @@ pub enum Stmt {
     Continue,
     Pass,
     Assert(Assert),
+    AnnAssign(AnnAssign),
     Expr(Expr),
 }
 
@@ -86,6 +87,13 @@ pub struct LetMut {
 #[derive(Clone, Debug)]
 pub struct Assign {
     pub target: Box<Expr>,
+    pub val: Expr,
+}
+
+#[derive(Clone, Debug)]
+pub struct AnnAssign {
+    pub name: String,
+    pub ty: Type,
     pub val: Expr,
 }
 

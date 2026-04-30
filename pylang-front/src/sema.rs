@@ -9,6 +9,9 @@ pub struct Sema {
     scopes: Vec<NameMap>,
     errors: Vec<SemaError>,
     fn_captures: HashMap<String, Vec<String>>,
+    current_class: Option<String>,
+    pub fn_var_types: HashMap<String, HashMap<String, Type>>,
+    decorator_map: HashMap<String, Type>,
 }
 
 pub type TypeMap = HashMap<String, TypeDef>;
@@ -39,6 +42,7 @@ pub struct ClassDef {
     pub name: String,
     pub bases: Vec<Type>,
     pub methods: HashMap<String, Fn>,
+    pub fields: HashMap<String, Type>,
 }
 
 #[derive(Clone, Debug)]
@@ -71,6 +75,7 @@ pub enum SemaError {
     UnresolvedReturn,
     InvalidReturn { expected: Type, found: Type },
     CannotAssignTo { name: String },
+    TypeAnnotationRequired { name: String },
 }
 
 #[allow(clippy::new_without_default)]
@@ -82,6 +87,9 @@ impl Sema {
             scopes: Vec::new(),
             errors: Vec::new(),
             fn_captures: HashMap::new(),
+            current_class: None,
+            fn_var_types: HashMap::new(),
+            decorator_map: HashMap::new(),
         };
         s.init_builtins();
         s
@@ -249,6 +257,9 @@ impl Sema {
     }
 
     pub fn check_module(&mut self, stmts: &[Stmt]) -> Result<(), Vec<SemaError>> {
+        // Build decorator map BEFORE checking statements, from the raw AST
+        self.build_decorator_map(stmts);
+        
         for stmt in stmts {
             self.check_stmt(stmt)?;
         }
@@ -257,6 +268,72 @@ impl Sema {
             Ok(())
         } else {
             Err(std::mem::take(&mut self.errors))
+        }
+    }
+
+    fn build_decorator_map(&mut self, stmts: &[Stmt]) {
+        // Build a temp map of fn_name → return type from raw AST
+        let fn_ret_types: HashMap<String, Type> = self.collect_fn_ret_types(stmts);
+        for stmt in stmts {
+            if let Stmt::Assign(a) = stmt {
+                if let Expr::Ident(func_name) = &*a.target {
+                    if let Expr::Call { func, args } = &a.val {
+                        if args.len() == 1 {
+                            if let Expr::Ident(arg_name) = &args[0] {
+                                if arg_name == func_name {
+                                    let key = self.extract_decorator_key(func);
+                                    if let Some(key) = key {
+                                        let ret_ty = fn_ret_types.get(func_name).cloned().unwrap_or(Type::Unit);
+                                        self.decorator_map.insert(key, ret_ty);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn collect_fn_ret_types(&self, stmts: &[Stmt]) -> HashMap<String, Type> {
+        let mut ret_types = HashMap::new();
+        for stmt in stmts {
+            match stmt {
+                Stmt::Fn(f) => {
+                    let ret_ty = f.ret.clone().unwrap_or(Type::Unit);
+                    ret_types.insert(f.name.clone(), ret_ty);
+                }
+                Stmt::Class(c) => {
+                    for item in &c.body {
+                        if let Stmt::Fn(f) = item {
+                            let ret_ty = f.ret.clone().unwrap_or(Type::Unit);
+                            ret_types.insert(f.name.clone(), ret_ty);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        ret_types
+    }
+
+    fn extract_decorator_key(&self, func: &Expr) -> Option<String> {
+        match func {
+            Expr::Method { args, .. } => {
+                if let Some(Expr::Str(key)) = args.first() {
+                    Some(key.clone())
+                } else {
+                    None
+                }
+            }
+            Expr::Call { func: inner, args: inner_args } => {
+                if let Some(Expr::Str(key)) = inner_args.first() {
+                    Some(key.clone())
+                } else {
+                    self.extract_decorator_key(inner)
+                }
+            }
+                _ => None,
         }
     }
 
@@ -396,6 +473,11 @@ impl Sema {
                     self.collect_identifiers_expr(&lm.val, &mut used_inner);
                     used.extend(used_inner);
                 }
+                Stmt::AnnAssign(a) => {
+                    let mut used_inner = HashSet::new();
+                    self.collect_identifiers_expr(&a.val, &mut used_inner);
+                    used.extend(used_inner);
+                }
                 Stmt::Assign(a) => {
                     let mut used_inner = HashSet::new();
                     self.collect_identifiers_expr(&a.val, &mut used_inner);
@@ -462,6 +544,11 @@ impl Sema {
                 Stmt::LetMut(lm) => {
                     let mut used_inner = HashSet::new();
                     self.collect_identifiers_expr(&lm.val, &mut used_inner);
+                    used.extend(used_inner);
+                }
+                Stmt::AnnAssign(a) => {
+                    let mut used_inner = HashSet::new();
+                    self.collect_identifiers_expr(&a.val, &mut used_inner);
                     used.extend(used_inner);
                 }
                 Stmt::Assign(a) => {
@@ -647,6 +734,7 @@ impl Sema {
             Stmt::Break => Ok(()),
             Stmt::Continue => Ok(()),
             Stmt::Pass => Ok(()),
+            Stmt::AnnAssign(a) => self.check_ann_assign(a),
             Stmt::LetMut(l) => self.check_letmut(l),
             Stmt::Assign(a) => self.check_assign(a),
             Stmt::AssignOp(a) => self.check_assignop(a),
@@ -662,9 +750,14 @@ impl Sema {
         self.enter_scope();
         
         for param in &f.params {
+            let param_ty = if param.name == "self" {
+                self.current_class.clone().map(Type::Class).unwrap_or(Type::Unit)
+            } else {
+                param.ty.clone()
+            };
             self.define_name(
                 param.name.clone(),
-                param.ty.clone(),
+                param_ty,
                 NameDef::Param,
             );
         }
@@ -673,26 +766,83 @@ impl Sema {
             self.check_stmt(stmt)?;
         }
         
+        // Collect local variable types from current scope before exiting
+        let mut local_vars: HashMap<String, Type> = HashMap::new();
+        if let Some(scope) = self.scopes.last() {
+            for (name, resolved) in scope.iter() {
+                if matches!(resolved.def, NameDef::Local | NameDef::Param) {
+                    let ty = resolved.ty.clone();
+                    // Normalize Type::Named("str") to Type::String for consistency with lowering
+                    let ty = if matches!(&ty, Type::Named(s) if s == "str") {
+                        Type::String
+                    } else {
+                        ty
+                    };
+                    local_vars.insert(name.clone(), ty);
+                }
+            }
+        }
+        let fn_key = match &self.current_class {
+            Some(cn) => format!("{}_{}", cn, f.name),
+            None => f.name.clone(),
+        };
+        self.fn_var_types.insert(fn_key, local_vars);
+        
         self.exit_scope();
         Ok(())
     }
     
     fn check_class(&mut self, c: &Class) -> Result<(), Vec<SemaError>> {
+        // First pass: collect field types from AST (before checking methods)
+        let mut field_types: HashMap<String, Type> = HashMap::new();
+        for stmt in &c.body {
+            match stmt {
+                Stmt::AnnAssign(a) => {
+                    field_types.insert(a.name.clone(), a.ty.clone());
+                }
+                Stmt::Let(l) => {
+                    let ty = l.ty.clone().unwrap_or(Type::Unit);
+                    field_types.insert(l.name.clone(), ty);
+                }
+                Stmt::Assign(a) => {
+                    if let Expr::Ident(name) = &*a.target {
+                        if let Ok(val_ty) = self.check_expr(&a.val) {
+                            field_types.insert(name.clone(), val_ty);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        
         let class_def = ClassDef {
             name: c.name.clone(),
             bases: c.bases.clone(),
             methods: HashMap::new(),
+            fields: field_types.clone(),
         };
         self.types.insert(c.name.clone(), TypeDef::Class(class_def));
         
         let ty = Type::Class(c.name.clone());
         self.define_name(c.name.clone(), ty, NameDef::Class);
         
+        self.current_class = Some(c.name.clone());
         self.enter_scope();
         for stmt in &c.body {
             self.check_stmt(stmt)?;
         }
+        
+        // Update fields with methods
+        if let Some(TypeDef::Class(ref mut class_def)) = self.types.get_mut(&c.name) {
+            for stmt in &c.body {
+                if let Stmt::Fn(f) = stmt {
+                    class_def.methods.insert(f.name.clone(), f.clone());
+                }
+            }
+        }
+        
         self.exit_scope();
+        self.current_class = None;
         
         Ok(())
     }
@@ -723,19 +873,38 @@ impl Sema {
     fn check_let(&mut self, l: &Let) -> Result<(), Vec<SemaError>> {
         let val_ty = self.check_expr(&l.val)?;
         
-        if let Some(ref ty) = l.ty {
-            if !self.types_equal(ty, &val_ty) {
-                self.errors.push(SemaError::TypeMismatch {
-                    expected: ty.clone(),
-                    found: val_ty.clone(),
-                });
-            }
+        let ty = l.ty.clone().ok_or_else(|| vec![SemaError::TypeAnnotationRequired { name: l.name.clone() }])?;
+        if !self.types_equal(&ty, &val_ty) {
+            self.errors.push(SemaError::TypeMismatch {
+                expected: ty.clone(),
+                found: val_ty.clone(),
+            });
         }
         
-        let ty = l.ty.clone().unwrap_or_else(|| val_ty.clone());
         self.define_name(l.name.clone(), ty, NameDef::Local);
         
         Ok(())
+    }
+
+    fn check_ann_assign(&mut self, a: &AnnAssign) -> Result<(), Vec<SemaError>> {
+        let val_ty = self.check_expr(&a.val)?;
+        let ann_ty = self.normalize_type(&a.ty);
+        let val_ty = self.normalize_type(&val_ty);
+        if !self.types_equal(&ann_ty, &val_ty) {
+            self.errors.push(SemaError::TypeMismatch {
+                expected: ann_ty.clone(),
+                found: val_ty.clone(),
+            });
+        }
+        self.define_name(a.name.clone(), ann_ty, NameDef::Local);
+        Ok(())
+    }
+
+    fn normalize_type(&self, ty: &Type) -> Type {
+        match ty {
+            Type::Named(s) if s == "str" => Type::String,
+            _ => ty.clone(),
+        }
     }
 
     fn check_return(&mut self, r: &Return) -> Result<(), Vec<SemaError>> {
@@ -965,6 +1134,14 @@ impl Sema {
                 for arg in args {
                     let _ = self.check_expr(arg)?;
                 }
+                // Dict store/load tracing: self.dict["key"]() → look up decorator_map
+                if let Expr::Index { obj: _, idx } = func.as_ref() {
+                    if let Expr::Str(key) = idx.as_ref() {
+                        if let Some(ret_ty) = self.decorator_map.get(key) {
+                            return Ok(ret_ty.clone());
+                        }
+                    }
+                }
                 Ok(self.call_return_type(&func_ty))
             }
             Expr::Method { obj, name, args } => {
@@ -972,8 +1149,13 @@ impl Sema {
                 for arg in args {
                     let _ = self.check_expr(arg)?;
                 }
-                if let Type::Class(class_name) = &obj_ty {
-                    if let Some(TypeDef::Class(c)) = self.types.get(class_name) {
+                let class_name = match &obj_ty {
+                    Type::Class(n) => Some(n.clone()),
+                    Type::Named(n) => Some(n.clone()),
+                    _ => None,
+                };
+                if let Some(class_name) = class_name {
+                    if let Some(TypeDef::Class(c)) = self.types.get(&class_name) {
                         if let Some(method) = c.methods.get(name) {
                             return Ok(method.ret.clone().unwrap_or(Type::Unit));
                         }
@@ -1165,6 +1347,8 @@ impl Sema {
             (Type::Bool, Type::Bool) => true,
             (Type::Char, Type::Char) => true,
             (Type::Unit, Type::Unit) => true,
+            (Type::String, Type::String) => true,
+            (Type::String, Type::Named(s)) | (Type::Named(s), Type::String) if s == "str" => true,
             (Type::Named(a), Type::Named(b)) => a == b,
             (Type::Class(a), Type::Class(b)) => a == b,
             (Type::Array(a), Type::Array(b)) => self.types_equal(a, b),
@@ -1172,6 +1356,12 @@ impl Sema {
             (Type::Tuple(a), Type::Tuple(b)) => a.len() == b.len() && a.iter().zip(b.iter()).all(|(x,y)| self.types_equal(x, y)),
             (Type::Fn { params: pa, ret: ra }, Type::Fn { params: pb, ret: rb }) =>
                 pa.len() == pb.len() && **ra == **rb && pa.iter().zip(pb.iter()).all(|(x,y)| self.types_equal(x, y)),
+            (Type::Generic { base: ba, args: aa }, Type::Generic { base: bb, args: ab }) =>
+                ba == bb && aa.len() == ab.len() && aa.iter().zip(ab.iter()).all(|(x,y)| self.types_equal(x, y)),
+            // Empty dict {} → Named("dict") vs Generic { base: "dict", ... } 
+            (Type::Named(n), Type::Generic { base: b, .. }) | (Type::Generic { base: b, .. }, Type::Named(n)) if n == b => true,
+            // Named("HttpServer") vs Class("HttpServer") — same class
+            (Type::Named(n), Type::Class(c)) | (Type::Class(c), Type::Named(n)) if n == c => true,
             _ => false,
         }
     }
@@ -1179,16 +1369,24 @@ impl Sema {
     fn call_return_type(&self, func_ty: &Type) -> Type {
         match func_ty {
             Type::Fn { ret, .. } => (**ret).clone(),
+            Type::Class(name) => Type::Class(name.clone()),
+            Type::Named(name) => Type::Named(name.clone()),
             _ => Type::Unit,
         }
     }
 
-    fn field_type(&self, obj_ty: &Type, _name: &str) -> Type {
-        if let Type::Class(name) = obj_ty {
-            if let Some(TypeDef::Class(c)) = self.types.get(name) {
-                if let Some(method) = c.methods.get(_name) {
-                    return method.ret.clone().unwrap_or(Type::Unit);
-                }
+    fn field_type(&self, obj_ty: &Type, name: &str) -> Type {
+        let class_name = match obj_ty {
+            Type::Class(n) => n.clone(),
+            Type::Named(n) => n.clone(),
+            _ => return Type::Unit,
+        };
+        if let Some(TypeDef::Class(c)) = self.types.get(&class_name) {
+            if let Some(field_ty) = c.fields.get(name) {
+                return field_ty.clone();
+            }
+            if let Some(method) = c.methods.get(name) {
+                return method.ret.clone().unwrap_or(Type::Unit);
             }
         }
         Type::Unit
@@ -1199,6 +1397,12 @@ impl Sema {
             Type::Array(elem) => (**elem).clone(),
             Type::Slice(elem) => (**elem).clone(),
             Type::Tuple(elems) => elems.first().cloned().unwrap_or(Type::Unit),
+            Type::Generic { base, args } if base == "dict" || base == "Dict" => {
+                args.get(1).cloned().unwrap_or(Type::Unit)
+            }
+            Type::Generic { base, args } if base == "list" || base == "List" || base == "Array" => {
+                args.first().cloned().unwrap_or(Type::Unit)
+            }
             _ => Type::Unit,
         }
     }
@@ -1448,7 +1652,7 @@ mod tests {
 
     #[test]
     fn test_capture_analysis() {
-        let code = r#"def outer(x):
+        let code = r#"def outer(x: int):
     def inner():
         print(x)
     return inner

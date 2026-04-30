@@ -1,16 +1,16 @@
 
 class HttpServer:
-    fd = 0
-    routers = {}
+    fd: int = 0
+    routers: dict[str, Callable] = {}
 
-    def __init___(self, routers):
+    def __init__(self, routers: dict[str, Callable]):
         self.fd = 0
-        self.routers = routers
+        self.routers: dict[str, Callable] = routers
 
-    def run(self, host, port):
+    def run(self, host: str, port: int) -> int:
         self.fd = socket(2, 1, 0)
 
-        err = bind(self.fd, host, port)
+        err: int = bind(self.fd, host, port)
         if err < 0:
             print("Address {host}:{port} already in use !!!\n")
             exit(1)
@@ -23,9 +23,9 @@ class HttpServer:
             data = recv(conn, 1024)
 
             if len(data) > 0:
-                content = self.routers["/health"]()
-                length = len(content)
-                response = f"HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n{content}\n"
+                content: str = self.routers["/health"]()
+                length: int = len(content)
+                response: str = f"HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n{content}\n"
                 send(conn, response)
             close(conn)
 
@@ -33,12 +33,12 @@ class HttpServer:
 
 
 class Router:
-    routers = {}
+    routers: dict[str, Callable] = {}
     
     def __init__(self):
-        self.routers = {}
+        self.routers: dict[str, Callable] = {}
 
-    def add_route(self, path: str, endpoint):
+    def add_route(self, path: str, endpoint: Callable):
         self.routers[path] = endpoint
 
         print(f"Route registered {path} !!!\n")
@@ -46,19 +46,19 @@ class Router:
 
 class FastPy:
     def __init__(self):
-        self.router = Router()
-        self.app = HttpServer(self.router.routers)
+        self.router: Router = Router()
+        self.app: HttpServer = HttpServer(self.router.routers)
 
     def run(self, host: str, port: int):
         self.app.run("0.0.0.0", 8080)
 
-    def post(self, path: str):
-        def decorator(func):
+    def post(self, path: str) -> Callable:
+        def decorator(func: Callable) -> Callable:
             self.router.add_route(path, func)
             return func
         return decorator
 
-app = FastPy()
+app: FastPy = FastPy()
 
 @app.post("/health")
 def health() -> str:
