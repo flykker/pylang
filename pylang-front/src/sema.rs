@@ -928,6 +928,14 @@ impl Sema {
             Expr::Float(_) => Ok(Type::F64),
             Expr::Bool(_) => Ok(Type::Bool),
             Expr::Str(_) => Ok(Type::Named("str".to_string())),
+            Expr::FString(parts) => {
+                for part in parts {
+                    if let FStringPart::Expr(e) = part {
+                        self.check_expr(e)?;
+                    }
+                }
+                Ok(Type::Named("str".to_string()))
+            }
             Expr::Char(_) => Ok(Type::Char),
             Expr::None => Ok(Type::Unit),
             Expr::Ident(name) => {

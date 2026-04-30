@@ -126,6 +126,41 @@ unsafe impl Sync for SockAddrBuf {}
 static SOCKADDR_BUF: SockAddrBuf = SockAddrBuf(UnsafeCell::new([0u8; 16]));
 
 #[no_mangle]
+pub extern "C" fn print_int_raw(x: i64) {
+    let buf = unsafe { &mut *PRINT_BUF.0.get() };
+    let ptr = buf.as_mut_ptr();
+    let mut i: usize = 0;
+
+    if x < 0 {
+        unsafe { ptr.add(0).write_volatile(b'-'); }
+        i = 1;
+    }
+
+    let abs_x = x.unsigned_abs() as usize;
+    let mut digits = [0u8; 20];
+    let mut j = 0;
+    let mut n = abs_x;
+    
+    if n == 0 {
+        unsafe { ptr.add(i).write_volatile(b'0'); }
+        i += 1;
+    } else {
+        while n > 0 {
+            digits[j] = DIGITS[n % 10];
+            n /= 10;
+            j += 1;
+        }
+        while j > 0 {
+            j -= 1;
+            unsafe { ptr.add(i).write_volatile(digits[j]); }
+            i += 1;
+        }
+    }
+
+    unsafe { syscall3(1, 1, ptr as usize, i); }
+}
+
+#[no_mangle]
 pub extern "C" fn print_int(x: i64) {
     let buf = unsafe { &mut *PRINT_BUF.0.get() };
     let ptr = buf.as_mut_ptr();
@@ -166,6 +201,35 @@ pub extern "C" fn print_int(x: i64) {
 #[no_mangle]
 pub extern "C" fn print_str(ptr: *const u8, len: usize) {
     unsafe { syscall3(1, 1, ptr as usize, len); }
+}
+
+#[no_mangle]
+pub extern "C" fn int_to_str(buf: *mut u8, val: i64) -> i64 {
+    let mut i: usize = 0;
+    if val < 0 {
+        unsafe { buf.add(0).write_volatile(b'-'); }
+        i = 1;
+    }
+    let abs_x = val.unsigned_abs() as usize;
+    let mut digits = [0u8; 20];
+    let mut j: usize = 0;
+    let mut n = abs_x;
+    if n == 0 {
+        unsafe { buf.add(i).write_volatile(b'0'); }
+        i += 1;
+    } else {
+        while n > 0 {
+            digits[j] = b'0' + (n % 10) as u8;
+            n /= 10;
+            j += 1;
+        }
+        while j > 0 {
+            j -= 1;
+            unsafe { buf.add(i).write_volatile(digits[j]); }
+            i += 1;
+        }
+    }
+    i as i64
 }
 
 #[no_mangle]

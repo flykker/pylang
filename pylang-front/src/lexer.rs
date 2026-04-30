@@ -127,6 +127,15 @@ pub enum TokenKind {
     Newline,
     Indent,
     Dedent,
+
+    // F-strings
+    FString(Vec<FStringSeg>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum FStringSeg {
+    Lit(String),
+    Expr(String),
 }
 
 #[derive(Clone, Debug)]
@@ -302,6 +311,12 @@ impl<'src> Lexer<'src> {
         }
         
         let ident = &self.source[start..self.offset].to_string();
+        
+        // Check for f-string: "f" or "F" followed by " or '
+        if (ident == "f" || ident == "F") && self.peek().map(|c| c == '"' || c == '\'').unwrap_or(false) {
+            return self.read_fstring();
+        }
+        
         let kind = match ident.as_str() {
             "def" => TokenKind::Def,
             "class" => TokenKind::Class,
@@ -462,6 +477,84 @@ impl<'src> Lexer<'src> {
             }
         }
         
+        None
+    }
+
+    fn read_fstring(&mut self) -> Option<(TokenKind, usize)> {
+        let start = self.offset;
+        let quote = self.advance()?;
+        let mut parts = Vec::new();
+        let mut current_lit = String::new();
+
+        while let Some(c) = self.peek() {
+            if c == quote {
+                self.advance();
+                if !current_lit.is_empty() {
+                    parts.push(FStringSeg::Lit(current_lit));
+                }
+                return Some((TokenKind::FString(parts), self.offset - start));
+            }
+            if c == '{' {
+                self.advance();
+                if self.peek() == Some('{') {
+                    self.advance();
+                    current_lit.push('{');
+                    continue;
+                }
+                if !current_lit.is_empty() {
+                    parts.push(FStringSeg::Lit(std::mem::take(&mut current_lit)));
+                }
+                let mut depth = 1u32;
+                let mut expr = String::new();
+                while let Some(ec) = self.peek() {
+                    if ec == '}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            self.advance();
+                            parts.push(FStringSeg::Expr(expr));
+                            break;
+                        }
+                        expr.push('}');
+                        self.advance();
+                    } else if ec == '{' {
+                        depth += 1;
+                        expr.push('{');
+                        self.advance();
+                    } else {
+                        expr.push(ec);
+                        self.advance();
+                    }
+                }
+                if depth > 0 {
+                    return None;
+                }
+            } else if c == '}' {
+                self.advance();
+                if self.peek() == Some('}') {
+                    self.advance();
+                    current_lit.push('}');
+                } else {
+                    current_lit.push('}');
+                }
+            } else if c == '\\' {
+                self.advance();
+                let e = self.advance()?;
+                let escaped = match e {
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    '\\' => '\\',
+                    '"' => '"',
+                    '\'' => '\'',
+                    _ => e,
+                };
+                current_lit.push(escaped);
+            } else {
+                current_lit.push(c);
+                self.advance();
+            }
+        }
+
         None
     }
 

@@ -3,7 +3,7 @@
 //! Recursive descent. Парсит type-annotated Python subset.
 
 use crate::ast::{Class, CompGen, *};
-use crate::lexer::{Lexer, Pos, Span, Spanned, TokenKind};
+use crate::lexer::{FStringSeg, Lexer, Pos, Span, Spanned, TokenKind};
 use crate::sema::Sema;
 
 pub struct Parser<'src> {
@@ -800,6 +800,20 @@ impl<'src> Parser<'src> {
                 self.bump();
                 Ok(Expr::None)
             }
+            TokenKind::FString(segments) => {
+                self.bump();
+                let mut parts = Vec::new();
+                for seg in segments {
+                    match seg {
+                        FStringSeg::Lit(s) => parts.push(FStringPart::Lit(s.clone())),
+                        FStringSeg::Expr(src) => {
+                            let expr = Parser::parse_sub_expr(src)?;
+                            parts.push(FStringPart::Expr(Box::new(expr)));
+                        }
+                    }
+                }
+                Ok(Expr::FString(parts))
+            }
             TokenKind::Lambda => self.parse_lambda(),
             _ => Err(ParseError::UnexpectedToken {
                 expected: "expression",
@@ -809,6 +823,11 @@ impl<'src> Parser<'src> {
         }
 }
         
+    fn parse_sub_expr(source: &str) -> Result<Expr, ParseError> {
+        let mut p = Parser::new(source);
+        p.parse_expr()
+    }
+
     fn parse_lambda(&mut self) -> Result<Expr, ParseError> {
         self.bump();
         

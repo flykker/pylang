@@ -10,7 +10,7 @@ class HttpServer:
 
         err = bind(self.fd, host, port)
         if err < 0:
-            print("Address already in use !!!\n")
+            print("Address {host}:{port} already in use !!!\n")
             exit(1)
 
         listen(self.fd, 10)
@@ -28,12 +28,14 @@ class HttpServer:
         close(self.fd)
 
 class Router:
-    routers = []
+    routers = {}
     
     def __init__(self):
-        pass
+        self.routers = {}
 
     def add_route(self, path, endpoint):
+        self.routers[path] = endpoint
+
         print("Route registered !!!\n")
 
     def post(self, path: str):
@@ -49,8 +51,8 @@ def health():
     print("Health is OK !\n")
 
 def main():
+    print("Run app ...\n")
     app = HttpServer()
     app.run("0.0.0.0", 8080)
 
-    print("Run app ...\n")
     health()

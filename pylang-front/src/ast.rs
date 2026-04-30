@@ -293,6 +293,13 @@ pub enum Expr {
     YieldFrom(Box<Expr>),
     Ident(String),
     Subscript(Vec<Expr>),
+    FString(Vec<FStringPart>),
+}
+
+#[derive(Clone, Debug)]
+pub enum FStringPart {
+    Lit(String),
+    Expr(Box<Expr>),
 }
 
 #[derive(Clone, Debug)]

@@ -2,7 +2,7 @@ use cranelift::prelude::*;
 use cranelift_codegen::ir::{UserFuncName, InstBuilder, BlockArg};
 use cranelift_module::{Module, Linkage, FuncId};
 use pylang_front::ast::{
-    Stmt, Expr, Type as AstType, BinOp, Fn as AstFn, CmpOp, UnOp,
+    Stmt, Expr, Type as AstType, BinOp, Fn as AstFn, CmpOp, UnOp, FStringPart,
     If, While, For, Loop, Match, Try, With, Raise, Assert, Yield,
     Param,
 };
@@ -659,6 +659,7 @@ fn lower_expr(expr: &Expr, lctx: &mut LowerCtx) -> Result<Value, String> {
             let bytes = s.as_bytes();
             alloc_string_literal(lctx, bytes)
         }
+        Expr::FString(parts) => lower_fstring(lctx, parts),
         Expr::Char(c) => Ok(lctx.builder.ins().iconst(types::I64, *c as i64)),
         Expr::None => Ok(lctx.builder.ins().iconst(types::I64, 0)),
         Expr::Ident(name) => {
@@ -881,7 +882,23 @@ fn lower_call(func: &Expr, args: &[Expr], lctx: &mut LowerCtx) -> Result<Value, 
         match name.as_str() {
             "print" => {
                 if let Some(&val) = arg_vals.first() {
-                    if let Some(Expr::Str(s)) = args.first() {
+                    if let Some(Expr::FString(parts)) = args.first() {
+                        for part in parts {
+                            match part {
+                                FStringPart::Lit(s) => {
+                                    let len = lctx.builder.ins().iconst(types::I64, s.len() as i64);
+                                    let ptr = alloc_string_literal(lctx, s.as_bytes())?;
+                                    let eight = lctx.builder.ins().iconst(types::I64, 8);
+                                    let dptr = lctx.builder.ins().iadd(ptr, eight);
+                                    call_runtime(lctx, "print_str", &[dptr, len], types::I64)?;
+                                }
+                                FStringPart::Expr(e) => {
+                                    let e_val = lower_expr(e, lctx)?;
+                                    call_runtime(lctx, "print_int_raw", &[e_val], types::I64)?;
+                                }
+                            }
+                        }
+                    } else if let Some(Expr::Str(s)) = args.first() {
                         let eight = lctx.builder.ins().iconst(types::I64, 8);
                         let data_ptr = lctx.builder.ins().iadd(val, eight);
                         let len = lctx.builder.ins().iconst(types::I64, s.len() as i64);
@@ -1283,6 +1300,50 @@ fn alloc_string_literal(lctx: &mut LowerCtx, bytes: &[u8]) -> Result<Value, Stri
         let byte_val = lctx.builder.ins().iconst(types::I8, b as i64);
         lctx.builder.ins().store(MemFlags::trusted(), byte_val, addr, 0);
     }
+    Ok(ptr)
+}
+
+fn lower_fstring(lctx: &mut LowerCtx, parts: &[FStringPart]) -> Result<Value, String> {
+    let total_literal: usize = parts.iter().map(|p| match p {
+        FStringPart::Lit(s) => s.len(),
+        FStringPart::Expr(_) => 20,
+    }).sum();
+
+    let total_size = lctx.builder.ins().iconst(types::I64, (total_literal + 8) as i64);
+    let ptr = call_runtime(lctx, "alloc", &[total_size], types::I64)?;
+
+    let zero = lctx.builder.ins().iconst(types::I64, 0);
+    lctx.builder.ins().store(MemFlags::trusted(), zero, ptr, 0);
+
+    let eight = lctx.builder.ins().iconst(types::I64, 8);
+    let mut offset = eight;
+
+    for part in parts {
+        match part {
+            FStringPart::Lit(s) => {
+                let bytes = s.as_bytes();
+                for (i, &b) in bytes.iter().enumerate() {
+                    let byte_off = lctx.builder.ins().iconst(types::I64, i as i64);
+                    let addr = lctx.builder.ins().iadd(ptr, offset);
+                    let addr = lctx.builder.ins().iadd(addr, byte_off);
+                    let byte_val = lctx.builder.ins().iconst(types::I8, b as i64);
+                    lctx.builder.ins().store(MemFlags::trusted(), byte_val, addr, 0);
+                }
+                let lit_len = lctx.builder.ins().iconst(types::I64, bytes.len() as i64);
+                offset = lctx.builder.ins().iadd(offset, lit_len);
+            }
+            FStringPart::Expr(e) => {
+                let val = lower_expr(e, lctx)?;
+                let buf = lctx.builder.ins().iadd(ptr, offset);
+                let written = call_runtime(lctx, "int_to_str", &[buf, val], types::I64)?;
+                offset = lctx.builder.ins().iadd(offset, written);
+            }
+        }
+    }
+
+    let final_len = lctx.builder.ins().isub(offset, eight);
+    lctx.builder.ins().store(MemFlags::trusted(), final_len, ptr, 0);
+
     Ok(ptr)
 }
 

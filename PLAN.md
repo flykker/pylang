@@ -531,11 +531,8 @@ def foo():
 | List/Dict literals | ✅ | ✅ | ✅ |
 | Struct | ✅ | ✅ | ✅ |
 | Class | ✅ | ✅ | ✅ |
-
-**❌ НЕ реализовано:**
-
-| Feature | Status |
-|---------|--------|
+| F-strings (f"..." with {expr}) | ✅ | ✅ | ✅ |
+| Decorators | ✅ | ✅ | ✅ |
 | Lambda | ✅ Parser+Sema, ❌ Lowering |
 | Async | ✅ Parser+Sema, ❌ Lowering |
 | Match expr | ✅ Parser, ❌ Lowering |
