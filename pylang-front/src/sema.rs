@@ -766,13 +766,12 @@ impl Sema {
             self.check_stmt(stmt)?;
         }
         
-        // Collect local variable types from current scope before exiting
+        // Collect local variable types from ALL scopes (including nested while/if)
         let mut local_vars: HashMap<String, Type> = HashMap::new();
-        if let Some(scope) = self.scopes.last() {
+        for scope in self.scopes.iter() {
             for (name, resolved) in scope.iter() {
                 if matches!(resolved.def, NameDef::Local | NameDef::Param) {
                     let ty = resolved.ty.clone();
-                    // Normalize Type::Named("str") to Type::String for consistency with lowering
                     let ty = if matches!(&ty, Type::Named(s) if s == "str") {
                         Type::String
                     } else {

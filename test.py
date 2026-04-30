@@ -5,7 +5,7 @@ class HttpServer:
 
     def __init__(self, routers: dict[str, Callable]):
         self.fd = 0
-        self.routers: dict[str, Callable] = routers
+        self.routers = routers
 
     def run(self, host: str, port: int) -> int:
         self.fd = socket(2, 1, 0)
@@ -19,13 +19,13 @@ class HttpServer:
         print(f"Running on port {port} ...\n")
 
         while 1:
-            conn = accept(self.fd)
+            conn: int = accept(self.fd)
             data = recv(conn, 1024)
 
             if len(data) > 0:
                 content: str = self.routers["/health"]()
                 length: int = len(content)
-                response: str = f"HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n{content}\n"
+                response: str = f"HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n{content}"
                 send(conn, response)
             close(conn)
 
@@ -68,4 +68,3 @@ def health() -> str:
 def main():
     print("Run app ...\n")
     app.run("0.0.0.0", 8080)
-

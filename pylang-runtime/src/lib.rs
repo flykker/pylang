@@ -281,7 +281,8 @@ pub extern "C" fn str_copy(dst: *mut u8, src: *const u8) -> i64 {
 #[no_mangle]
 pub extern "C" fn dict_read(dict: *const u8, key: i64) -> i64 {
     let num = unsafe { *(dict as *const i64) };
-    if !(0i64..=1000000).contains(&num) { return 0; }
+    // Safety check
+    if num <= 0 || num > 1000000 { return 0; }
     for i in 0..(num as usize) {
         let k = unsafe { *((dict as *const i64).add(2 + i * 2)) };
         if k == key {
@@ -289,6 +290,18 @@ pub extern "C" fn dict_read(dict: *const u8, key: i64) -> i64 {
         }
     }
     0
+}
+
+#[no_mangle]
+pub extern "C" fn call_fn(fn_ptr: i64) -> i64 {
+    let f: extern "C" fn() -> i64 = unsafe { core::mem::transmute(fn_ptr as *const ()) };
+    f()
+}
+
+#[no_mangle]
+pub extern "C" fn dict_call(dict: *const u8, key: i64) -> i64 {
+    let fn_ptr = dict_read(dict, key);
+    call_fn(fn_ptr)
 }
 
 #[no_mangle]

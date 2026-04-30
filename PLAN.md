@@ -611,6 +611,145 @@ def foo():
 
 ---
 
+### Phase 2.19 — Segfault Fix + String Variable Propagation + F-string Lowering Fix (завершена ✅)
+
+**Цель:** Исправить segfault при работе HTTP сервера, исправить f-string lowering для строковых переменных из вложенных блоков.
+
+**Проблемы:**
+1. **Segfault**: `si_addr=NULL` после `recvfrom` — несколько причин:
+   - `block_filled` break в `lower_fn_inner`/`lower_fn_closure` прерывал lowering после control flow
+   - `_dummy_slot` (8,4) → нужно (32,16) для SSE alignment стекового фрейма
+   - `call_indirect` для function variables давал неверную ABI → заменён на `call_fn` trampoline
+   - `Expr::Index { obj, idx }` вызов (`self.routers["/health"]()`) не обрабатывался → добавлен `dict_call`
+2. **F-string `{content}` печатал pointer вместо строки** (`4206778` вместо `{'health':'ok'}`):
+   - `collect_string_vars` сканировал только top-level statements, не заходя в `if`/`while`/`for`
+   - `append_str_or_int` в `lower_fstring` создавал внутренние блоки (str/int/merge) и seal'ил merge_block, ломая CFG внешнего цикла
+   - `Expr::Ident(_)` без проверки type annotation не распознавал `content: str = ...` как строку
+3. **F-string `{port}` — `append_str_or_int` удалён**, заменён на прямой `int_to_str`
+
+**Исправления в `lower.rs`:**
+- ✅ `_dummy_slot`: (8,4) → (32,16) в `lower_fn_inner` и `lower_fn_closure`
+- ✅ Убран `block_filled` break из циклов `for stmt in &f.body`
+- ✅ `call_indirect` для function variables → `call_runtime(lctx, "call_fn", ...)`
+- ✅ Добавлен `Expr::Index { obj, idx }` case → `call_runtime(lctx, "dict_call", ...)`
+- ✅ `append_str_or_int` удалён из `lower_fstring`, заменён на `int_to_str`
+- ✅ `collect_string_vars`: рекурсивный обход `if`/`while`/`for`/`loop`/`match` тел
+- ✅ `collect_string_vars`: проверка `l.ty` (type annotation) через `ty_is_string`/`let_ty_is_string`
+- ✅ `collect_string_vars`: проверка `AnnAssign.ty` на `String`/`Named("str")`
+
+**Добавлено в runtime (`lib.rs`):**
+- ✅ `call_fn(fn_ptr: i64) -> i64` — trampoline для вызова функции по указателю
+- ✅ `dict_call(dict, key) -> i64` — dict_read + call_fn
+
+**Исправлено в sema (`sema.rs`):**
+- ✅ `fn_var_types` собирается из ВСЕХ scopes (включая вложенные while/if)
+
+**Тестирование:**
+- ✅ 59 тестов, clippy clean (pre-existing warnings only)
+- ✅ HTTP сервер: множественные запросы, body = `{'health':'ok'}`
+- ✅ ELF smoke test: print(42) → "42"
+- ✅ `f"Running on port {port} ...\n"` → корректный вывод
+
+---
+
+---
+
+## Code Review Findings — 2026-04-30
+
+Полный аудит всей кодовой базы (13 Rust-файлов, 6 crate'ов). Выявлены проблемы, сгруппированные по приоритету:
+
+### 🔴 CRITICAL — Корректность и архитектура
+
+| # | Файл | Строки | Проблема | Рекомендация |
+|---|------|--------|----------|-------------|
+| 1 | `lower.rs` | 524–531, 652–659 | **HashMap `.clone()` на каждый вызов функции**. `LowerCtx` копирует `func_ids`, `closure_defs`, `global_vars`, `struct_defs`, `class_defs` для каждой функции. O(N×M) memory/cpu overhead. | Передавать `&HashMap` везде. Использовать `Rc<RefCell<HashMap>>` если нужна мутация внутри функции. |
+| 2 | `sema.rs` | 67–77 | **8 из 11 SemaError variants — dead code**: `DuplicateName`, `CyclicType`, `TraitNotSatisfied`, `InvalidMutation`, `BorrowViolation`, `UnresolvedReturn`, `InvalidReturn`, `CannotAssignTo`. Никогда не конструируются. | Удалить неиспользуемые. Каждый variant должен иметь минимум 1 use-site. |
+| 3 | `lower.rs` | 697–713 | **`clif_type()` возвращает `I64` для Unit, всех Named и Generic типов**. Не делает различия между int, bool, string, struct pointer. Все типы сжаты в `I64`. | Добавить правильные CLIF-типы: `I8` для bool, `R64` для struct ref. Unit должен быть void. |
+| 4 | `lower.rs` | 1631–1684 | **`append_str_or_int` и `print_str_or_int` — `#[allow(dead_code)]`**, но создают внутренние CFG блоки (`brif`/`seal_block`). При вызове в цикле ломают CFG → segfault. | Удалить обе функции. Использовать проверку типа на этапе компиляции через `string_vars`/`param_types`. |
+| 5 | `sema.rs` | 535–606 | **`collect_identifiers_stmts`** — 70 строк дубликата `collect_identifiers_with_locals`, только без `HashSet` параметра. Вызывается 3 раза (в Match). | Убрать дубликат, использовать `collect_identifiers_with_locals`. |
+| 6 | `parser.rs` | 76,102 | **`std::mem::discriminant` сравнивает только variant**, не значение — `TokenKind::Ident("foo")` == `TokenKind::Ident("bar")` → true. `expect()` пропускает неверные токены. | Заменить на полное сравнение `PartialEq`. Создать аналог `TokenKind::AnyIdent` или переписать `expect` для значений. |
+| 7 | `lower.rs` | 465–484 | **`has_return_val` сканирует тело функции через `.any()`** — принимает решение о возвращаемом типе на основе статического анализа AST, частично игнорируя `f.ret`. Хрупкая эвристика. | Использовать аннотацию `f.ret` как primary source. `has_return_val` — только fallback для Void-функций. |
+| 8 | `lower.rs` | 473 | **`ret_ty = Some(types::I64)` для `main`** хардкодом. При return `Type::Unit` из main сигнатура становится неверной. | Проверять `f.ret` для main. `main` должен иметь `I64` ret, но сообщать ошибку если аннотация другая. |
+
+### 🟡 MEDIUM — Качество кода
+
+| # | Файл | Проблема | Рекомендация |
+|---|------|----------|-------------|
+| 9 | `lower.rs` | **Монолит: 2265 строк**. `lower_call` — 365 строк с 25+ builtins в одном match. Смесь builtin-диспетчера, class-constructor, indirect-call, global-vars в одной функции. | Разбить на модули: `lower/builtins.rs`, `lower/control_flow.rs`, `lower/expr.rs`, `lower/classes.rs`. Каждый builtin — отдельная функция. |
+| 10 | `lower.rs` | **`lower_fn_inner` — 13 параметров**. Чрезмерная сигнатура, 6 `#[allow(clippy::too_many_arguments)]`. | Создать `LowerPass` struct с state. Или `LowerCtxBuilder`. |
+| 11 | `sema.rs` | **Неиспользуемый `errors` Vec в Lexer**: поле `errors` есть, `LexerErrors` определён, но `lexer.next_token()` никогда не записывает ошибки. | Удалить или реализовать error recovery. Сейчас ошибки лексера молча проглатываются (возвращают `None`). |
+| 12 | `lower.rs` | **`LoopContext` type более приватный чем `LowerCtx::loop_stack`** — clippy warning. `pub struct LowerCtx` содержит `pub loop_stack: Vec<LoopContext>`, но `LoopContext` не pub. | Сделать `LoopContext` pub или `loop_stack` не-pub с методами. |
+| 13 | `lower.rs` | **`StructField` — поля с префиксом `_`**: `_name`, `_ty`, `_fields`, `_methods` — workaround для "unused field" clippy, хотя поля активно используются. | Переименовать без `_`, разобраться почему clippy считает их неиспользуемыми (вероятно из-за `.clone()` + access через `field.name` а не `field._name`). |
+| 14 | `emit.rs` | 26 | **`_main_fn` — неиспользуемая переменная**. Поиск main в AST выполняется, но результат не используется. | Удалить поиск или использовать для проверки. |
+| 15 | `cli/lib.rs` | 1–3 | **Бойлерплейт `add()` функция** — не используется нигде. | Удалить. |
+| 16 | `std/lib.rs` | | **Пустой crate** — placeholder. | Либо наполнить, либо удалить из workspace. |
+| 17 | `lower.rs` | 689–695 | **`extract_int_from_expr`**: возвращает `0` для всех не-int/не-bool выражений — молчаливый fallback. При `self.field = some_expr()` default будет 0. | Возвращать `Result<i64, String>` или требовать compile-time константы. |
+| 18 | `lower.rs` | 1219–1224 | **Дубликат `recv_string`** — идентичен `recv`. | Удалить или дифференцировать. |
+| 19 | `lower.rs` | 1841–1878 | **`lower_if` не обрабатывает `elif`** — только `then` и `else_`. Ветки elif игнорируются в lowering. | Добавить elif chain в if lowering. |
+| 20 | `lower.rs` | 2059-2061,  | 3 и более необрабатываемых кейса `swallow` (не документированы). `Expr::Await` → просто вызывает `lower_expr(inner)`. `Expr::YieldFrom` → то же. Создаёт ложное ощущение поддержки. | Добавить явные ошибки для неподдерживаемых фич. |
+
+### 🟢 LOW — Стандартизация и best practices
+
+| # | Файл | Проблема | Рекомендация |
+|---|------|----------|-------------|
+| 21 | `lower.rs` | **Магическая константа `10_000_000_000`** для различения pointer/int. Хрупкая эвристика — объект может быть по любому адресу, int может быть > 10B. | Использовать информацию о типах из sema (`string_vars`, `param_types`, `fn_var_types`). |
+| 22 | `lower.rs` | **`resolve_method_name` O(N×M) fallback** — линейный поиск по всем классам для каждого method call. | Кэшировать или строить `method_name → class` map на этапе определения классов. |
+| 23 | `lower.rs` | 715–717 | **`ast_type_to_clif` — бесполезная обёртка**: просто вызывает `clif_type`. | Удалить или добавить логику конверсии. |
+| 24 | `parser.rs` | 839–842 | **`parse_sub_expr` создаёт новый `Parser`** для f-string sub-expressions. Теряет информацию о позиции в исходном файле. | Переиспользовать существующий парсер с ограниченным контекстом. |
+| 25 | `lexer.rs` | 192 | **`#[allow(dead_code)]` на `errors: Vec<LexError>`** — никогда не заполняется. | Реализовать error recovery или удалить. |
+| 26 | `lower.rs` | 1834–1838 | **`get_field_offset` fallback**: `_data`, `_len`, `first` → 0, `_cap`, `second` → 8. Магические имена полей. | Убрать fallback. Неизвестные поля должны давать ошибку компиляции. |
+| 27 | `lower.rs` | 913 | **`resolve_dot_field_offset` возвращает `i64`** — может быть отрицательным/невалидным. Ошибки не обрабатываются. | Возвращать `Result<i64, String>`. |
+
+### 📊 Метрики
+
+| Метрика | Значение |
+|---------|---------|
+| Всего тестов | 52 passed (pylang-front) |
+| Всего строк кода | ~5900 Rust |
+| Крупнейший файл | `lower.rs` (2265 строк, 38% кодовой базы) |
+| Dead code variants | 8 SemaError variants, 2 dead functions |
+| `#[allow(...)]` аннотаций | 13 (cli дополнительные 2 от clippy) |
+| HashMap `.clone()` на вызов | 5 хеш-таблиц × количество функций |
+| Clippy warnings | 3 (pylang-front: 2, cranelift: 1) |
+
+### 🎯 Приоритетный план оптимизации (Phase 3_pre — Code Quality)
+
+```
+1. Удалить dead code:
+   - 8 SemaError variants неиспользуемых
+   - collect_identifiers_stmts (70 строк дубликата)
+   - append_str_or_int, print_str_or_int (#[allow(dead_code)])
+   - pylang-cli/src/lib.rs add()
+   - Lexer.errors (никогда не заполняется)
+
+2. HashMap clone → &HashMap references
+   - LowerCtx должен принимать ссылки
+   - Обновить все места создания LowerCtx (3 места)
+
+3. Разбить lower.rs на модули:
+   - lower/builtins.rs (~400 строк)
+   - lower/control_flow.rs (~250 строк)
+   - lower/expr.rs (~200 строк)
+   - lower/classes.rs (~300 строк)
+   - lower/fns.rs (~200 строк)
+   - lower/mod.rs (~800 строк)
+
+4. Улучшить типизацию:
+   - clif_type должен различать I8/I32/I64/F64
+   - Убрать I64 для Unit (void)
+   - Использовать типы из sema вместо "всё I64"
+
+5. Исправить parser expect():
+   - Заменить std::mem::discriminant на полное сравнение
+   - Добавить TokenKind::AnyIdent вариант
+
+6. Убрать магический threshold 10_000_000_000:
+   - Использовать string_vars/param_types/fn_var_types из sema
+   - Удалить print_str_or_int и append_str_or_int
+```
+
+---
+
 ### Phase 3 — Performance (отложена)
 
 **Oставшиеся unsupported lowering (могут быть добавлены позже):**

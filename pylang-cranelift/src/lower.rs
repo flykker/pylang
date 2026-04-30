@@ -501,7 +501,7 @@ fn lower_fn_inner(
 
     builder.append_block_params_for_function_params(entry);
 
-    let _dummy_slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 4));
+    let _dummy_slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 32, 16));
 
     let mut locals = HashMap::new();
 
@@ -537,9 +537,6 @@ fn lower_fn_inner(
     };
 
     for stmt in &f.body {
-        if lctx.block_filled {
-            break;
-        }
         lower_stmt(stmt, &mut lctx)?;
     }
 
@@ -613,7 +610,7 @@ fn lower_fn_closure(
 
     builder.append_block_params_for_function_params(entry);
 
-    let _dummy_slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 4));
+    let _dummy_slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 32, 16));
 
     let mut locals = HashMap::new();
 
@@ -668,9 +665,6 @@ fn lower_fn_closure(
     };
 
     for stmt in &f.body {
-        if lctx.block_filled {
-            break;
-        }
         lower_stmt(stmt, &mut lctx)?;
     }
 
@@ -1386,15 +1380,7 @@ fn lower_call(func: &Expr, args: &[Expr], lctx: &mut LowerCtx) -> Result<Value, 
                     }
                 } else if let Some(&var) = lctx.locals.get(name) {
                     let fn_val = lctx.builder.use_var(var);
-                    let mut sig = lctx.module.make_signature();
-                    for arg in &arg_vals {
-                        sig.params.push(AbiParam::new(lctx.builder.func.dfg.value_type(*arg)));
-                    }
-                    sig.returns.push(AbiParam::new(types::I64));
-                    let sig_ref = lctx.builder.import_signature(sig);
-                    let call = lctx.builder.ins().call_indirect(sig_ref, fn_val, &arg_vals);
-                    let results = lctx.builder.inst_results(call);
-                    Ok(if results.is_empty() { lctx.builder.ins().iconst(types::I64, 0) } else { results[0] })
+                    call_runtime(lctx, "call_fn", &[fn_val], types::I64)
                 } else {
                     let mut sig = lctx.module.make_signature();
                     for arg in &arg_vals {
@@ -1415,36 +1401,25 @@ fn lower_call(func: &Expr, args: &[Expr], lctx: &mut LowerCtx) -> Result<Value, 
                 }
             }
         }
+    } else if let Expr::Index { obj, idx } = func {
+        let obj_val = lower_expr(obj, lctx)?;
+        let idx_val = lower_expr(idx, lctx)?;
+        call_runtime(lctx, "dict_call", &[obj_val, idx_val], types::I64)
     } else {
-        // Indirect call: closure struct (fn_ptr at offset 0) or direct fn pointer
         let fn_val = lower_expr(func, lctx)?;
-        let is_closure = !matches!(*func, Expr::Index { .. });
-        
-        if is_closure {
-            let fn_ptr = lctx.builder.ins().load(types::I64, MemFlags::trusted(), fn_val, 0);
-            let mut sig = lctx.module.make_signature();
-            sig.params.push(AbiParam::new(types::I64));
-            for arg in &arg_vals {
-                sig.params.push(AbiParam::new(lctx.builder.func.dfg.value_type(*arg)));
-            }
-            sig.returns.push(AbiParam::new(types::I64));
-            let sig_ref = lctx.builder.import_signature(sig);
-            let mut all_args = vec![fn_val];
-            all_args.extend(&arg_vals);
-            let call = lctx.builder.ins().call_indirect(sig_ref, fn_ptr, &all_args);
-            let results = lctx.builder.inst_results(call);
-            Ok(if results.is_empty() { lctx.builder.ins().iconst(types::I64, 0) } else { results[0] })
-        } else {
-            let mut sig = lctx.module.make_signature();
-            for arg in &arg_vals {
-                sig.params.push(AbiParam::new(lctx.builder.func.dfg.value_type(*arg)));
-            }
-            sig.returns.push(AbiParam::new(types::I64));
-            let sig_ref = lctx.builder.import_signature(sig);
-            let call = lctx.builder.ins().call_indirect(sig_ref, fn_val, &arg_vals);
-            let results = lctx.builder.inst_results(call);
-            Ok(if results.is_empty() { lctx.builder.ins().iconst(types::I64, 0) } else { results[0] })
+        let fn_ptr = lctx.builder.ins().load(types::I64, MemFlags::trusted(), fn_val, 0);
+        let mut sig = lctx.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        for arg in &arg_vals {
+            sig.params.push(AbiParam::new(lctx.builder.func.dfg.value_type(*arg)));
         }
+        sig.returns.push(AbiParam::new(types::I64));
+        let sig_ref = lctx.builder.import_signature(sig);
+        let mut all_args = vec![fn_val];
+        all_args.extend(&arg_vals);
+        let call = lctx.builder.ins().call_indirect(sig_ref, fn_ptr, &all_args);
+        let results = lctx.builder.inst_results(call);
+        Ok(if results.is_empty() { lctx.builder.ins().iconst(types::I64, 0) } else { results[0] })
     }
 }
 
@@ -1635,9 +1610,6 @@ fn lower_fstring(lctx: &mut LowerCtx, parts: &[FStringPart]) -> Result<Value, St
                     Expr::Ident(n) if lctx.param_types.get(n) == Some(&AstType::String) || lctx.string_vars.contains(n) => {
                         call_runtime(lctx, "str_copy", &[buf, val], types::I64)?
                     }
-                    Expr::Ident(_) => {
-                        append_str_or_int(lctx, buf, val)?
-                    }
                     _ => {
                         call_runtime(lctx, "int_to_str", &[buf, val], types::I64)?
                     }
@@ -1655,6 +1627,7 @@ fn lower_fstring(lctx: &mut LowerCtx, parts: &[FStringPart]) -> Result<Value, St
 
 /// Runtime branch: if val looks like a string pointer (> 10B), use str_copy;
 /// otherwise convert the int to decimal via int_to_str.
+#[allow(dead_code)]
 fn append_str_or_int(lctx: &mut LowerCtx, buf: Value, val: Value) -> Result<Value, String> {
     let threshold = lctx.builder.ins().iconst(types::I64, 10_000_000_000i64);
     let is_ptr = lctx.builder.ins().icmp(IntCC::UnsignedGreaterThan, val, threshold);
@@ -1750,6 +1723,14 @@ fn get_field_offset_for_class(lctx: &LowerCtx, field_name: &str, class_name: Opt
     get_field_offset(lctx, field_name)
 }
 
+fn ty_is_string(ty: &AstType) -> bool {
+    matches!(ty, AstType::String) || matches!(ty, AstType::Named(n) if n == "str")
+}
+
+fn let_ty_is_string(ty: &Option<AstType>) -> bool {
+    ty.as_ref().is_some_and(ty_is_string)
+}
+
 fn collect_string_vars(
     body: &[Stmt],
     fn_ret_types: &HashMap<String, AstType>,
@@ -1766,18 +1747,41 @@ fn collect_string_vars(
                 }
             }
             Stmt::AnnAssign(a) => {
-                if is_expr_known_string(&a.val, fn_ret_types, fn_var_types) {
+                if ty_is_string(&a.ty) || is_expr_known_string(&a.val, fn_ret_types, fn_var_types) {
                     sv.insert(a.name.clone());
                 }
             }
             Stmt::Let(l) => {
-                if is_expr_known_string(&l.val, fn_ret_types, fn_var_types) {
+                if let_ty_is_string(&l.ty) || is_expr_known_string(&l.val, fn_ret_types, fn_var_types) {
                     sv.insert(l.name.clone());
                 }
             }
             Stmt::LetMut(l) => {
-                if is_expr_known_string(&l.val, fn_ret_types, fn_var_types) {
+                if let_ty_is_string(&l.ty) || is_expr_known_string(&l.val, fn_ret_types, fn_var_types) {
                     sv.insert(l.name.clone());
+                }
+            }
+            Stmt::If(i) => {
+                sv.extend(collect_string_vars(&i.then, fn_ret_types, fn_var_types));
+                if let Some(ref else_) = i.else_ {
+                    sv.extend(collect_string_vars(else_, fn_ret_types, fn_var_types));
+                }
+                for elif in &i.elif {
+                    sv.extend(collect_string_vars(&elif.body, fn_ret_types, fn_var_types));
+                }
+            }
+            Stmt::While(w) => {
+                sv.extend(collect_string_vars(&w.body, fn_ret_types, fn_var_types));
+            }
+            Stmt::For(f) => {
+                sv.extend(collect_string_vars(&f.body, fn_ret_types, fn_var_types));
+            }
+            Stmt::Loop(l) => {
+                sv.extend(collect_string_vars(&l.body, fn_ret_types, fn_var_types));
+            }
+            Stmt::Match(m) => {
+                for arm in &m.arms {
+                    sv.extend(collect_string_vars(&arm.body, fn_ret_types, fn_var_types));
                 }
             }
             _ => {}
