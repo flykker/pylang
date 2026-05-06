@@ -14,13 +14,14 @@ pub fn write_simple_elf(
     output: &Path,
     ast: &[Stmt],
     fn_var_types: &HashMap<String, HashMap<String, AstType>>,
+    source_dir: &Path,
 ) -> Result<(), String> {
     let runtime_o = compile_runtime_lib()?;
     
     let mut module = create_module()?;
     
     // Lower all Python functions to CLIF via the new lowering pipeline
-    let func_ids = lower_module(&mut module, ast, fn_var_types)?;
+    let func_ids = lower_module(&mut module, ast, fn_var_types, source_dir)?;
     
     // Ensure main exists — if not, create an empty one
     let _main_fn = ast.iter().find(|s| matches!(s, Stmt::Fn(f) if f.name == "main"));
@@ -177,7 +178,8 @@ mod tests {
             captures: vec![],
         })];
         let empty_map = HashMap::new();
-        let result = write_simple_elf(output, &ast, &empty_map);
+        let source_dir = Path::new(".");
+        let result = write_simple_elf(output, &ast, &empty_map, source_dir);
         if let Err(ref e) = result {
             eprintln!("test_write_elf error: {}", e);
         }

@@ -5,6 +5,7 @@ use pylang_front::lexer::Lexer;
 use pylang_front::parser::Parser as PylangParser;
 use pylang_front::sema::Sema;
 use pylang_cranelift::Compiler;
+use std::path::Path;
 use std::process;
 
 #[derive(Parser, Debug)]
@@ -33,6 +34,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     let source = std::fs::read_to_string(&args.file)?;
+    let source_dir = Path::new(&args.file).parent().unwrap_or(Path::new(".")).to_path_buf();
     println!("Parsing: {}", &args.file);
 
     let mut sema = Sema::new();
@@ -80,9 +82,9 @@ fn main() -> Result<()> {
                 println!("Compiling to ELF...");
                 let compiler = Compiler::new();
                 let result = if args.no_sema {
-                    compiler.compile_to_elf(&ast, &args.output)
+                    compiler.compile_to_elf(&ast, &args.output, &source_dir)
                 } else {
-                    compiler.compile_to_elf_with_types(&ast, &args.output, &fn_var_types)
+                    compiler.compile_to_elf_with_types(&ast, &args.output, &fn_var_types, &source_dir)
                 };
                 match result {
                     Ok(()) => {

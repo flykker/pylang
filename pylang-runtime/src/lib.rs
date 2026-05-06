@@ -84,9 +84,7 @@ pub extern "C" fn exit(code: i64) -> i64 {
 }
 
 struct PrintBuf64(UnsafeCell<[u8; 64]>);
-
 unsafe impl Sync for PrintBuf64 {}
-
 static PRINT_BUF: PrintBuf64 = PrintBuf64(UnsafeCell::new([0u8; 64]));
 
 static DIGITS: [u8; 10] = *b"0123456789";
@@ -101,21 +99,16 @@ pub extern "C" fn string_ptr(idx: usize) -> *const u8 {
 #[no_mangle]
 pub extern "C" fn string_to_sockaddr(ip_ptr: *const u8, port: i32) -> *mut u8 {
     let mut addr: [u8; 16] = [0; 16];
-    addr[0] = 2;  // AF_INET
+    addr[0] = 2;
     let port_be = (port as u16).to_be_bytes();
     addr[2] = port_be[0];
     addr[3] = port_be[1];
-    
-    // Check IP string to get correct sin_addr at offset 4
     let ip = unsafe { core::slice::from_raw_parts(ip_ptr, 8) };
     if ip[0] == b'0' && ip[1] == b'.' {
-        // "0.0.0.0" -> sin_addr = 0.0.0.0 (already zeros)
     } else if ip[0] == b'1' && ip[1] == b'2' && ip[2] == b'7' {
-        // "127.0.0.1"
         addr[4] = 127;
         addr[7] = 1;
     }
-    // Copy to fixed buffer
     let buf = SOCKADDR_BUF.0.get() as *mut u8;
     unsafe { core::ptr::copy_nonoverlapping(addr.as_ptr(), buf, 16) };
     buf
@@ -130,17 +123,14 @@ pub extern "C" fn print_int_raw(x: i64) {
     let buf = unsafe { &mut *PRINT_BUF.0.get() };
     let ptr = buf.as_mut_ptr();
     let mut i: usize = 0;
-
     if x < 0 {
         unsafe { ptr.add(0).write_volatile(b'-'); }
         i = 1;
     }
-
     let abs_x = x.unsigned_abs() as usize;
     let mut digits = [0u8; 20];
     let mut j = 0;
     let mut n = abs_x;
-    
     if n == 0 {
         unsafe { ptr.add(i).write_volatile(b'0'); }
         i += 1;
@@ -156,7 +146,6 @@ pub extern "C" fn print_int_raw(x: i64) {
             i += 1;
         }
     }
-
     unsafe { syscall3(1, 1, ptr as usize, i); }
 }
 
@@ -165,17 +154,14 @@ pub extern "C" fn print_int(x: i64) {
     let buf = unsafe { &mut *PRINT_BUF.0.get() };
     let ptr = buf.as_mut_ptr();
     let mut i: usize = 0;
-
     if x < 0 {
         unsafe { ptr.add(0).write_volatile(b'-'); }
         i = 1;
     }
-
     let abs_x = x.unsigned_abs() as usize;
     let mut digits = [0u8; 20];
     let mut j = 0;
     let mut n = abs_x;
-    
     if n == 0 {
         unsafe { ptr.add(i).write_volatile(b'0'); }
         i += 1;
@@ -191,10 +177,8 @@ pub extern "C" fn print_int(x: i64) {
             i += 1;
         }
     }
-
     unsafe { ptr.add(i).write_volatile(b'\n'); }
     i += 1;
-
     unsafe { syscall3(1, 1, ptr as usize, i); }
 }
 
@@ -281,7 +265,6 @@ pub extern "C" fn str_copy(dst: *mut u8, src: *const u8) -> i64 {
 #[no_mangle]
 pub extern "C" fn dict_read(dict: *const u8, key: i64) -> i64 {
     let num = unsafe { *(dict as *const i64) };
-    // Safety check
     if num <= 0 || num > 1000000 { return 0; }
     for i in 0..(num as usize) {
         let k = unsafe { *((dict as *const i64).add(2 + i * 2)) };
@@ -293,15 +276,16 @@ pub extern "C" fn dict_read(dict: *const u8, key: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn call_fn(fn_ptr: i64) -> i64 {
+pub extern "C" fn dict_call(dict: *const u8, key: i64) -> i64 {
+    let fn_ptr = dict_read(dict, key);
     let f: extern "C" fn() -> i64 = unsafe { core::mem::transmute(fn_ptr as *const ()) };
     f()
 }
 
 #[no_mangle]
-pub extern "C" fn dict_call(dict: *const u8, key: i64) -> i64 {
-    let fn_ptr = dict_read(dict, key);
-    call_fn(fn_ptr)
+pub extern "C" fn call_fn(fn_ptr: i64) -> i64 {
+    let f: extern "C" fn() -> i64 = unsafe { core::mem::transmute(fn_ptr as *const ()) };
+    f()
 }
 
 #[no_mangle]
@@ -311,13 +295,11 @@ pub extern "C" fn socket(domain: i32, r#type: i32, protocol: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn setsockopt(fd: i32, level: i32, optname: i32, optval: *const u8, optlen: i32) -> i32 {
-    // syscall 54: setsockopt(fd, level, optname, optval, optlen)
     unsafe { syscall6(54, fd as usize, level as usize, optname as usize, optval as usize, optlen as usize, 0) as i32 }
 }
 
 #[no_mangle]
 pub extern "C" fn bind(fd: i32, sockaddr_ptr: *mut u8, addrlen: usize) -> i32 {
-    // Enable SO_REUSEADDR to avoid EADDRINUSE on restart
     let optval: i32 = 1;
     unsafe { syscall6(54, fd as usize, 1, 2, &optval as *const _ as usize, 4, 0); }
     unsafe { syscall3(49, fd as usize, sockaddr_ptr as usize, addrlen) as i32 }
@@ -345,9 +327,7 @@ pub extern "C" fn accept(fd: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn recv(fd: i32, buf: *mut u8, size: usize) -> isize {
-    // buf layout: [len: i64][data: u8 * size]
     let data_ptr = unsafe { buf.add(8) };
-    // recvfrom syscall (45): recvfrom(fd, buf, len, flags=0, src_addr=NULL, addrlen=NULL)
     let ret = unsafe { syscall6(45, fd as usize, data_ptr as usize, size, 0, 0, 0) as isize };
     if ret > 0 {
         unsafe { *(buf as *mut i64) = ret as i64 };
@@ -359,11 +339,24 @@ pub extern "C" fn recv(fd: i32, buf: *mut u8, size: usize) -> isize {
 
 #[no_mangle]
 pub extern "C" fn send(fd: i32, data: *const u8) -> isize {
-    // data layout: [len: i64][data: u8 * len]
     let len = unsafe { *(data as *const i64) } as usize;
     let data_ptr = unsafe { data.add(8) };
-    // sendto syscall (44): sendto(fd, buf, len, flags=0, dest_addr=NULL, addrlen=0)
     unsafe { syscall6(44, fd as usize, data_ptr as usize, len, 0, 0, 0) as isize }
+}
+
+#[no_mangle]
+pub extern "C" fn fork() -> i32 {
+    unsafe { syscall3(57, 0, 0, 0) as i32 }
+}
+
+#[no_mangle]
+pub extern "C" fn wait() -> i32 {
+    unsafe { syscall3(61, 0, 0, 0) as i32 }
+}
+
+#[no_mangle]
+pub extern "C" fn waitpid(pid: i32, status: *mut i32, options: usize) -> i32 {
+    unsafe { syscall6(260, pid as usize, status as usize, options, 0, 0, 0) as i32 }
 }
 
 #[no_mangle]

@@ -12,9 +12,9 @@ impl Compiler {
         Self
     }
 
-    pub fn compile_to_elf(&self, ast: &[Stmt], output: &str) -> Result<(), String> {
+    pub fn compile_to_elf(&self, ast: &[Stmt], output: &str, source_dir: &Path) -> Result<(), String> {
         let empty_map = HashMap::new();
-        emit::write_simple_elf(Path::new(output), ast, &empty_map)
+        emit::write_simple_elf(Path::new(output), ast, &empty_map, source_dir)
     }
 
     pub fn compile_to_elf_with_types(
@@ -22,8 +22,9 @@ impl Compiler {
         ast: &[Stmt],
         output: &str,
         fn_var_types: &HashMap<String, HashMap<String, AstType>>,
+        source_dir: &Path,
     ) -> Result<(), String> {
-        emit::write_simple_elf(Path::new(output), ast, fn_var_types)
+        emit::write_simple_elf(Path::new(output), ast, fn_var_types, source_dir)
     }
 }
 

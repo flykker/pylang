@@ -162,6 +162,30 @@ impl Sema {
             def: NameDef::Function,
         });
 
+        self.names.insert("embed".to_string(), ResolvedName {
+            name: "embed".to_string(),
+            ty: Type::Fn { params: vec![Type::Named("str".to_string())], ret: Box::new(Type::Named("str".to_string())) },
+            def: NameDef::Function,
+        });
+
+        self.names.insert("fork".to_string(), ResolvedName {
+            name: "fork".to_string(),
+            ty: Type::Fn { params: vec![], ret: Box::new(Type::I64) },
+            def: NameDef::Function,
+        });
+
+        self.names.insert("wait".to_string(), ResolvedName {
+            name: "wait".to_string(),
+            ty: Type::Fn { params: vec![], ret: Box::new(Type::I64) },
+            def: NameDef::Function,
+        });
+
+        self.names.insert("waitpid".to_string(), ResolvedName {
+            name: "waitpid".to_string(),
+            ty: Type::Fn { params: vec![Type::I64, Type::I64, Type::I64], ret: Box::new(Type::I64) },
+            def: NameDef::Function,
+        });
+
         self.names.insert("socket".to_string(), ResolvedName {
             name: "socket".to_string(),
             ty: Type::Fn { params: vec![Type::I64, Type::I64, Type::I64], ret: Box::new(Type::I64) },
@@ -700,7 +724,7 @@ impl Sema {
     }
 
     fn is_builtin(name: &str) -> bool {
-        matches!(name, "print" | "len" | "range" | "int" | "str" | "bool" | "float" | "input"
+        matches!(name, "print" | "len" | "range" | "int" | "str" | "bool" | "float" | "input" | "embed"
             | "socket" | "bind" | "listen" | "accept" | "recv" | "recv_string" | "send" | "connect" | "exit" | "close"
             | "recv_buf_ptr" | "recv_buf_len" | "alloc_copy" | "string_ptr" | "string_to_sockaddr"
             | "setsockopt")

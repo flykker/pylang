@@ -1,4 +1,3 @@
-
 class HttpServer:
     fd: int = 0
     routers: dict[str, Callable] = {}
@@ -12,7 +11,7 @@ class HttpServer:
 
         err: int = bind(self.fd, host, port)
         if err < 0:
-            print("Address {host}:{port} already in use !!!\n")
+            print(f"Address {host}:{port} already in use !!!\n")
             exit(1)
 
         listen(self.fd, 10)
@@ -20,13 +19,17 @@ class HttpServer:
 
         while 1:
             conn: int = accept(self.fd)
-            data = recv(conn, 1024)
+            pid: int = fork()
+            if pid == 0:
+                data = recv(conn, 1024)
 
-            if len(data) > 0:
-                content: str = self.routers["/health"]()
-                length: int = len(content)
-                response: str = f"HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n{content}"
-                send(conn, response)
+                if len(data) > 0:
+                    content: str = self.routers["/"]()
+                    length: int = len(content)
+                    response: str = f"HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n{content}"
+                    send(conn, response)
+                close(conn)
+                exit(0)
             close(conn)
 
         close(self.fd)
@@ -40,7 +43,6 @@ class Router:
 
     def add_route(self, path: str, endpoint: Callable):
         self.routers[path] = endpoint
-
         print(f"Route registered {path} !!!\n")
 
 
@@ -58,12 +60,23 @@ class FastPy:
             return func
         return decorator
 
+    def get(self, path: str) -> Callable:
+        def decorator(func: Callable) -> Callable:
+            self.router.add_route(path, func)
+            return func
+        return decorator
+
 app: FastPy = FastPy()
 
 @app.post("/health")
 def health() -> str:
     print("Log:Main Health is OK !\n")
     return "{'health':'ok'}"
+
+@app.get("/")
+def hello() -> str:
+    msg: str = embed("index.html")
+    return msg
 
 def main():
     print("Run app ...\n")

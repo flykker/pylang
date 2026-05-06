@@ -6,6 +6,7 @@ use pylang_front::ast::{
     If, While, For, Loop, Match, Try, With, Raise, Assert, Yield,
 };
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 #[derive(Clone)]
 struct StructField {
@@ -58,6 +59,7 @@ pub struct LowerCtx<'a> {
     pub global_var_types: &'a HashMap<String, String>,
     pub string_vars: HashSet<String>,
     pub fn_ret_types: &'a HashMap<String, AstType>,
+    pub source_dir: PathBuf,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -100,6 +102,7 @@ pub fn lower_module(
     module: &mut dyn Module,
     stmts: &[Stmt],
     fn_var_types: &HashMap<String, HashMap<String, AstType>>,
+    source_dir: &Path,
 ) -> Result<HashMap<String, FuncId>, String> {
     let mut struct_defs: HashMap<String, StructInfo> = HashMap::new();
     let mut class_defs: HashMap<String, ClassInfo> = HashMap::new();
@@ -351,13 +354,13 @@ pub fn lower_module(
                             decorators: vec![],
                             captures: vec![],
                         };
-                        let id = lower_fn_inner(module, &method_fn, &struct_defs, &class_defs, &mut func_ids, &mut closure_defs, &global_vars, &mut string_cache, Some(&c.name), &global_var_types, &fn_ret_types, fn_var_types)?;
+                        let id = lower_fn_inner(module, &method_fn, &struct_defs, &class_defs, &mut func_ids, &mut closure_defs, &global_vars, &mut string_cache, Some(&c.name), &global_var_types, &fn_ret_types, fn_var_types, source_dir)?;
                         func_ids.insert(method_name, id);
                     }
                 }
             }
             Stmt::Fn(f) => {
-                let id = lower_fn_inner(module, f, &struct_defs, &class_defs, &mut func_ids, &mut closure_defs, &global_vars, &mut string_cache, None, &global_var_types, &fn_ret_types, fn_var_types)?;
+                let id = lower_fn_inner(module, f, &struct_defs, &class_defs, &mut func_ids, &mut closure_defs, &global_vars, &mut string_cache, None, &global_var_types, &fn_ret_types, fn_var_types, source_dir)?;
                 func_ids.insert(f.name.clone(), id);
             }
             _ => {}
@@ -366,7 +369,7 @@ pub fn lower_module(
     
     // Third pass: lower module-level non-function statements (decorator desugaring, etc.)
     if !module_stmts.is_empty() {
-        let init_id = lower_module_init(module, &module_stmts, &struct_defs, &class_defs, &mut func_ids, &mut closure_defs, &global_vars, &mut string_cache, &global_var_types, &fn_ret_types, fn_var_types)?;
+        let init_id = lower_module_init(module, &module_stmts, &struct_defs, &class_defs, &mut func_ids, &mut closure_defs, &global_vars, &mut string_cache, &global_var_types, &fn_ret_types, fn_var_types, source_dir)?;
         func_ids.insert("_init_module".to_string(), init_id);
     }
     
@@ -386,6 +389,7 @@ fn lower_module_init(
     global_var_types: &HashMap<String, String>,
     fn_ret_types: &HashMap<String, AstType>,
     fn_var_types: &HashMap<String, HashMap<String, AstType>>,
+    source_dir: &Path,
 ) -> Result<FuncId, String> {
     let init_fn = pylang_front::ast::Fn {
         name: "_init_module".to_string(),
@@ -395,7 +399,7 @@ fn lower_module_init(
         decorators: vec![],
         captures: vec![],
     };
-    lower_fn_inner(module, &init_fn, struct_defs, class_defs, func_ids, closure_defs, global_vars, string_cache, None, global_var_types, fn_ret_types, fn_var_types)
+    lower_fn_inner(module, &init_fn, struct_defs, class_defs, func_ids, closure_defs, global_vars, string_cache, None, global_var_types, fn_ret_types, fn_var_types, source_dir)
 }
 
 
@@ -414,7 +418,7 @@ pub fn lower_fn(
     fn_var_types: &HashMap<String, HashMap<String, AstType>>,
 ) -> Result<FuncId, String> {
     let empty_types = HashMap::new();
-    lower_fn_inner(module, f, struct_defs, class_defs, func_ids, closure_defs, global_vars, string_cache, None, &empty_types, fn_ret_types, fn_var_types)
+    lower_fn_inner(module, f, struct_defs, class_defs, func_ids, closure_defs, global_vars, string_cache, None, &empty_types, fn_ret_types, fn_var_types, Path::new("."))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -431,6 +435,7 @@ fn lower_fn_inner(
     global_var_types: &HashMap<String, String>,
     fn_ret_types: &HashMap<String, AstType>,
     fn_var_types: &HashMap<String, HashMap<String, AstType>>,
+    source_dir: &Path,
 ) -> Result<FuncId, String> {
 
     // Pre-pass: find nested functions and hoist them to module level
@@ -451,7 +456,7 @@ fn lower_fn_inner(
             };
             let nested_id = lower_fn_closure(
                 module, &hoisted_fn, &nested.captures,
-                struct_defs, class_defs, func_ids, closure_defs, global_vars, string_cache, global_var_types, fn_ret_types, fn_var_types,
+                struct_defs, class_defs, func_ids, closure_defs, global_vars, string_cache, global_var_types, fn_ret_types, fn_var_types, source_dir,
             )?;
             func_ids.insert(mangled_name.clone(), nested_id);
             closure_defs.insert(nested.name.clone(), ClosureInfo {
@@ -534,6 +539,7 @@ fn lower_fn_inner(
         global_var_types,
         string_vars,
         fn_ret_types,
+        source_dir: source_dir.to_path_buf(),
     };
 
     for stmt in &f.body {
@@ -572,6 +578,7 @@ fn lower_fn_closure(
     global_var_types: &HashMap<String, String>,
     fn_ret_types: &HashMap<String, AstType>,
     fn_var_types: &HashMap<String, HashMap<String, AstType>>,
+    source_dir: &Path,
 ) -> Result<FuncId, String> {
     // Hoisted function signature: (closure_ptr: i64, actual_params...) -> ret
     let mut sig = module.make_signature();
@@ -662,6 +669,7 @@ fn lower_fn_closure(
         global_var_types,
         string_vars,
         fn_ret_types,
+        source_dir: source_dir.to_path_buf(),
     };
 
     for stmt in &f.body {
@@ -1283,6 +1291,20 @@ fn lower_call(func: &Expr, args: &[Expr], lctx: &mut LowerCtx) -> Result<Value, 
                     Err("close(fd) requires argument".to_string())
                 }
             }
+            "fork" => {
+                call_runtime(lctx, "fork", &[], types::I64)
+            }
+            "wait" => {
+                call_runtime(lctx, "wait", &[], types::I64)
+            }
+            "waitpid" => {
+                if arg_vals.len() >= 1 {
+                    let args: &[Value] = &arg_vals;
+                    call_runtime(lctx, "waitpid", args, types::I64)
+                } else {
+                    Err("waitpid(pid, status, options) requires arguments".to_string())
+                }
+            }
             "setsockopt" => {
                 if arg_vals.len() >= 4 {
                     let fd = arg_vals[0];
@@ -1296,6 +1318,16 @@ fn lower_call(func: &Expr, args: &[Expr], lctx: &mut LowerCtx) -> Result<Value, 
                     call_runtime(lctx, "setsockopt", &[fd, level, optname, buf, four], types::I64)
                 } else {
                     Err("setsockopt(fd, level, optname, optval) requires 4 arguments".to_string())
+                }
+            }
+            "embed" => {
+                if let Some(Expr::Str(path)) = args.first() {
+                    let full_path = lctx.source_dir.join(path);
+                    let data = std::fs::read(&full_path)
+                        .map_err(|e| format!("embed file '{}' not found: {}", path, e))?;
+                    alloc_string_literal(lctx, &data)
+                } else {
+                    Err("embed() requires a string literal argument".to_string())
                 }
             }
             _ => {
