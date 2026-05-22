@@ -6,33 +6,56 @@ class HttpServer:
         self.fd = 0
         self.routers = routers
 
+    def worker(self, listen_fd: int):
+        efd: int = epoll_create1(0)
+        ev: epoll_event = epoll_event(0x1, listen_fd)
+        epoll_ctl(efd, 1, listen_fd, struct_ptr(ev))
+
+        events: epoll_event = epoll_event(64)
+
+        while 1:
+            n: int = epoll_wait(efd, events, 64, -1)
+            i: int = 0
+            while i < n:
+                ev: epoll_event = events[i]
+                conn: int = ev.data
+                if conn == listen_fd:
+                    conn = accept4(listen_fd, 0)
+                    if conn > 0:
+                        conn_ev: epoll_event = epoll_event(0x1, conn)
+                        epoll_ctl(efd, 1, conn, struct_ptr(conn_ev))
+                else:
+                    buf: ptr = alloc_sys(1032)
+                    nread: int = recv_sys(conn, buf, 1024)
+                    if nread > 0:
+                        content: str = self.routers["/"]()
+                        length: int = len(content)
+                        response: str = f"HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n{content}"
+                        send(conn, response)
+                    close(conn)
+                i = i + 1
+
     def run(self, host: str, port: int) -> int:
-        self.fd = socket_sys(2, 1, 0)
+        self.fd = socket(2, 1, 0)
 
         err: int = bind(self.fd, host, port)
         if err < 0:
             print(f"Address {host}:{port} already in use !!!\n")
             exit(1)
 
-        listen(self.fd, 10)
+        listen(self.fd, 1024)
         print(f"Running on port {port} ...\n")
 
-        while 1:
-            conn: int = accept_sys(self.fd)
-            
-            pid: int = fork_sys()
+        i: int = 0
+        while i < 4:
+            pid: int = fork()
             if pid == 0:
-                buf: ptr = alloc_sys(1032)
-                data_n: int = recv_sys(conn, buf, 1024)
+                self.worker(self.fd)
+                return 0
+            i = i + 1
 
-                if data_n > 0:
-                    content: str = self.routers["/"]()
-                    length: int = len(content)
-                    response: str = f"HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n{content}"
-                    send(conn, response)
-                close(conn)
-                exit(0)
-        close_sys(self.fd)
+        while 1:
+            waitpid(-1, 0)
 
 
 class Router:

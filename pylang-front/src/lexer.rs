@@ -266,6 +266,32 @@ impl<'src> Lexer<'src> {
 
     fn read_number(&mut self) -> Option<(TokenKind, usize)> {
         let start = self.offset;
+        
+        // Check for hex literal: 0x or 0X
+        let source_bytes = self.source.as_bytes();
+        if source_bytes.get(self.offset) == Some(&b'0') {
+            if let Some(&next) = source_bytes.get(self.offset + 1) {
+                if next == b'x' || next == b'X' {
+                    self.advance(); // '0'
+                    self.advance(); // 'x' / 'X'
+                    let hex_start = self.offset;
+                    while let Some(c) = self.peek() {
+                        if c.is_ascii_hexdigit() {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    if self.offset > hex_start {
+                        let num_str = &self.source[hex_start..self.offset];
+                        let n = i64::from_str_radix(num_str, 16).ok()?;
+                        return Some((TokenKind::Int(n), self.offset - start));
+                    }
+                    return None; // "0x" with no hex digits
+                }
+            }
+        }
+        
         let mut has_dot = false;
         let mut has_exp = false;
         

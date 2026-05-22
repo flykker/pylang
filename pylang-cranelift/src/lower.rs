@@ -58,6 +58,7 @@ pub struct LowerCtx<'a> {
     pub current_class: Option<String>,
     pub global_var_types: &'a HashMap<String, String>,
     pub string_vars: HashSet<String>,
+    pub struct_vars: HashMap<String, String>,
     pub fn_ret_types: &'a HashMap<String, AstType>,
     pub source_dir: PathBuf,
 }
@@ -176,7 +177,7 @@ pub fn lower_module(
                             field_defaults.push(default_val);
                             offset += 8;
                         }
-                        Stmt::Assign(a) => {
+        Stmt::Assign(a) => {
                             if let Expr::Dot { obj, name } = &*a.target {
                                 if let Expr::Ident(s) = &**obj {
                                     if s == "self" {
@@ -522,6 +523,23 @@ fn lower_fn_inner(
 
     let string_vars = collect_string_vars(&f.body, fn_ret_types, fn_var_types);
     
+    let fn_key = f.name.clone();
+    let struct_vars = fn_var_types.get(&fn_key)
+        .map(|vars| {
+            vars.iter().filter_map(|(name, ty)| {
+                if let AstType::Named(n) = ty {
+                    if struct_defs.contains_key(n) {
+                        Some((name.clone(), n.clone()))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }).collect()
+        })
+        .unwrap_or_default();
+    
     let mut lctx = LowerCtx {
         builder,
         module,
@@ -538,6 +556,7 @@ fn lower_fn_inner(
         current_class: class_name.map(|s| s.to_string()),
         global_var_types,
         string_vars,
+        struct_vars,
         fn_ret_types,
         source_dir: source_dir.to_path_buf(),
     };
@@ -668,6 +687,7 @@ fn lower_fn_closure(
         current_class: None,
         global_var_types,
         string_vars,
+        struct_vars: HashMap::new(),
         fn_ret_types,
         source_dir: source_dir.to_path_buf(),
     };
@@ -749,6 +769,20 @@ fn lower_stmt(stmt: &Stmt, lctx: &mut LowerCtx) -> Result<(), String> {
             let var = lctx.builder.declare_var(lctx.builder.func.dfg.value_type(val));
             lctx.builder.def_var(var, val);
             lctx.locals.insert(l.name.clone(), var);
+            Ok(())
+        }
+        Stmt::AnnAssign(a) => {
+            let val = lower_expr(&a.val, lctx)?;
+            if lctx.global_vars.contains_key(&a.name) {
+                let &data_id = lctx.global_vars.get(&a.name).unwrap();
+                let data_ref = lctx.module.declare_data_in_func(data_id, lctx.builder.func);
+                let global_addr = lctx.builder.ins().symbol_value(types::I64, data_ref);
+                lctx.builder.ins().store(MemFlags::trusted(), val, global_addr, 0);
+            } else {
+                let var = lctx.builder.declare_var(lctx.builder.func.dfg.value_type(val));
+                lctx.builder.def_var(var, val);
+                lctx.locals.insert(a.name.clone(), var);
+            }
             Ok(())
         }
         Stmt::Assign(a) => {
@@ -925,6 +959,26 @@ fn lower_expr(expr: &Expr, lctx: &mut LowerCtx) -> Result<Value, String> {
         Expr::Index { obj, idx } => {
             let obj_val = lower_expr(obj, lctx)?;
             let idx_val = lower_expr(idx, lctx)?;
+            // Struct array subscript: events[i] → reinterpret (no dict_read)
+            if let Expr::Ident(name) = obj.as_ref() {
+                let struct_name = lctx.struct_vars.get(name).cloned()
+                    .or_else(|| {
+                        if lctx.struct_defs.contains_key(name) {
+                            Some(name.clone())
+                        } else {
+                            None
+                        }
+                    });
+                if let Some(ref sn) = struct_name {
+                    if let Some(struct_info) = lctx.struct_defs.get(sn) {
+                        let elem_size = (struct_info.fields.len() * 8) as i64;
+                        let elem_size_val = lctx.builder.ins().iconst(types::I64, elem_size);
+                        let offset = lctx.builder.ins().imul(idx_val, elem_size_val);
+                        let addr = lctx.builder.ins().iadd(obj_val, offset);
+                        return Ok(addr);
+                    }
+                }
+            }
             Ok(call_runtime(lctx, "dict_read", &[obj_val, idx_val], types::I64)?)
         }
         Expr::Slice { .. } => Err("slice lowering not yet supported".to_string()),
@@ -1084,6 +1138,14 @@ fn lower_call(func: &Expr, args: &[Expr], lctx: &mut LowerCtx) -> Result<Value, 
                                 }
                                 FStringPart::Expr(e) => {
                                     let e_val = lower_expr(e, lctx)?;
+                                    let e_val = {
+                                        let ty = lctx.builder.func.dfg.value_type(e_val);
+                                        if ty != types::I64 {
+                                            lctx.builder.ins().uextend(types::I64, e_val)
+                                        } else {
+                                            e_val
+                                        }
+                                    };
                                     let is_known_str = matches!(&**e, Expr::Ident(n) if lctx.param_types.get(n) == Some(&AstType::String) || lctx.string_vars.contains(n));
                                     if is_known_str {
                                         let len = lctx.builder.ins().load(types::I64, MemFlags::trusted(), e_val, 0);
@@ -1355,6 +1417,13 @@ fn lower_call(func: &Expr, args: &[Expr], lctx: &mut LowerCtx) -> Result<Value, 
                     Err("syscall6(num, a1, a2, a3, a4, a5, a6) requires 7 arguments".to_string())
                 }
             }
+            "struct_ptr" => {
+                if arg_vals.is_empty() {
+                    Err("struct_ptr(val) requires 1 argument".to_string())
+                } else {
+                    Ok(arg_vals[0])
+                }
+            }
             _ => {
                 // Check global_vars first (decorator-reassigned functions take priority)
                 if let Some(&data_id) = lctx.global_vars.get(name) {
@@ -1375,16 +1444,26 @@ fn lower_call(func: &Expr, args: &[Expr], lctx: &mut LowerCtx) -> Result<Value, 
                         Ok(results[0])
                     }
                 } else if let Some(struct_info) = lctx.struct_defs.get(name).cloned() {
-                    let size = lctx.builder.ins().iconst(types::I64, (struct_info.fields.len() * 8) as i64);
-                    let ptr = call_runtime(lctx, "alloc", &[size], types::I64)?;
-                    for (i, field) in struct_info.fields.iter().enumerate() {
-                        if i < arg_vals.len() {
-                            let offset_val = lctx.builder.ins().iconst(types::I64, field.offset);
-                            let addr = lctx.builder.ins().iadd(ptr, offset_val);
-                            lctx.builder.ins().store(MemFlags::trusted(), arg_vals[i], addr, 0);
+                    if arg_vals.len() == 1 {
+                        // Array allocation: struct_name(count)
+                        let count = arg_vals[0];
+                        let elem_size = (struct_info.fields.len() * 8) as i64;
+                        let elem_size_val = lctx.builder.ins().iconst(types::I64, elem_size);
+                        let total_size = lctx.builder.ins().imul(count, elem_size_val);
+                        let ptr = call_runtime(lctx, "alloc", &[total_size], types::I64)?;
+                        Ok(ptr)
+                    } else {
+                        let size = lctx.builder.ins().iconst(types::I64, (struct_info.fields.len() * 8) as i64);
+                        let ptr = call_runtime(lctx, "alloc", &[size], types::I64)?;
+                        for (i, field) in struct_info.fields.iter().enumerate() {
+                            if i < arg_vals.len() {
+                                let offset_val = lctx.builder.ins().iconst(types::I64, field.offset);
+                                let addr = lctx.builder.ins().iadd(ptr, offset_val);
+                                lctx.builder.ins().store(MemFlags::trusted(), arg_vals[i], addr, 0);
+                            }
                         }
+                        Ok(ptr)
                     }
-                    Ok(ptr)
                 } else if let Some(class_info) = lctx.class_defs.get(name).cloned() {
                     let size = lctx.builder.ins().iconst(types::I64, (class_info._fields.len() * 8) as i64);
                     let ptr = call_runtime(lctx, "alloc", &[size], types::I64)?;
@@ -1632,12 +1711,23 @@ fn alloc_string_literal(lctx: &mut LowerCtx, bytes: &[u8]) -> Result<Value, Stri
 }
 
 fn lower_fstring(lctx: &mut LowerCtx, parts: &[FStringPart]) -> Result<Value, String> {
-    let total_literal: usize = parts.iter().map(|p| match p {
+    let max_expr_size: usize = parts.iter().map(|p| match p {
         FStringPart::Lit(s) => s.len(),
-        FStringPart::Expr(_) => 20,
+        FStringPart::Expr(e) => {
+            if let Expr::Ident(n) = &**e {
+                if lctx.param_types.get(n) == Some(&AstType::String) || lctx.string_vars.contains(n) {
+                    65536
+                } else {
+                    20
+                }
+            } else {
+                20
+            }
+        }
     }).sum();
+    let size = max_expr_size + 8;
 
-    let total_size = lctx.builder.ins().iconst(types::I64, (total_literal + 8) as i64);
+    let total_size = lctx.builder.ins().iconst(types::I64, size as i64);
     let ptr = call_runtime(lctx, "alloc", &[total_size], types::I64)?;
 
     let zero = lctx.builder.ins().iconst(types::I64, 0);
@@ -1662,6 +1752,14 @@ fn lower_fstring(lctx: &mut LowerCtx, parts: &[FStringPart]) -> Result<Value, St
             }
             FStringPart::Expr(e) => {
                 let val = lower_expr(e, lctx)?;
+                let val = {
+                    let ty = lctx.builder.func.dfg.value_type(val);
+                    if ty != types::I64 {
+                        lctx.builder.ins().uextend(types::I64, val)
+                    } else {
+                        val
+                    }
+                };
                 let buf = lctx.builder.ins().iadd(ptr, offset);
                 let written = match &**e {
                     Expr::Ident(n) if lctx.param_types.get(n) == Some(&AstType::String) || lctx.string_vars.contains(n) => {
@@ -1713,6 +1811,14 @@ fn append_str_or_int(lctx: &mut LowerCtx, buf: Value, val: Value) -> Result<Valu
 
 /// Runtime branch for print(f"...") fast-path.
 fn print_str_or_int(lctx: &mut LowerCtx, val: Value) -> Result<(), String> {
+    let val = {
+        let ty = lctx.builder.func.dfg.value_type(val);
+        if ty != types::I64 {
+            lctx.builder.ins().uextend(types::I64, val)
+        } else {
+            val
+        }
+    };
     let threshold = lctx.builder.ins().iconst(types::I64, 10_000_000_000i64);
     let is_ptr = lctx.builder.ins().icmp(IntCC::UnsignedGreaterThan, val, threshold);
 
@@ -1752,6 +1858,13 @@ fn trace_obj_class(obj: &Expr, lctx: &LowerCtx) -> Option<String> {
             if name == "self" {
                 lctx.current_class.clone()
             } else {
+                lctx.struct_vars.get(name).cloned()
+            }
+        }
+        Expr::Index { obj: inner, .. } => {
+            if let Expr::Ident(name) = inner.as_ref() {
+                lctx.struct_vars.get(name).cloned()
+            } else {
                 None
             }
         }
@@ -1766,10 +1879,17 @@ fn trace_obj_class(obj: &Expr, lctx: &LowerCtx) -> Option<String> {
 }
 
 fn get_field_offset_for_class(lctx: &LowerCtx, field_name: &str, class_name: Option<&str>) -> i64 {
-    // First check the specific class if provided
+    // First check the specific class or struct if provided
     if let Some(cn) = class_name {
         if let Some(class_info) = lctx.class_defs.get(cn) {
             for field in &class_info._fields {
+                if field._name == field_name {
+                    return field.offset;
+                }
+            }
+        }
+        if let Some(struct_info) = lctx.struct_defs.get(cn) {
+            for field in &struct_info.fields {
                 if field._name == field_name {
                     return field.offset;
                 }

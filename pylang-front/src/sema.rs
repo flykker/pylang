@@ -11,6 +11,7 @@ pub struct Sema {
     fn_captures: HashMap<String, Vec<String>>,
     current_class: Option<String>,
     pub fn_var_types: HashMap<String, HashMap<String, Type>>,
+    all_locals: HashMap<String, (Type, NameDef)>,
     decorator_map: HashMap<String, Type>,
 }
 
@@ -52,7 +53,7 @@ pub struct ResolvedName {
     pub def: NameDef,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum NameDef {
     Param,
     Local,
@@ -90,6 +91,7 @@ impl Sema {
             current_class: None,
             fn_var_types: HashMap::new(),
             decorator_map: HashMap::new(),
+            all_locals: HashMap::new(),
         };
         s.init_builtins();
         s
@@ -283,6 +285,12 @@ impl Sema {
         self.names.insert("signal".to_string(), ResolvedName {
             name: "signal".to_string(),
             ty: Type::Fn { params: vec![Type::I64, Type::I64], ret: Box::new(Type::I64) },
+            def: NameDef::Function,
+        });
+
+        self.names.insert("struct_ptr".to_string(), ResolvedName {
+            name: "struct_ptr".to_string(),
+            ty: Type::Fn { params: vec![Type::I64], ret: Box::new(Type::I64) },
             def: NameDef::Function,
         });
 
@@ -746,7 +754,7 @@ impl Sema {
         matches!(name, "print" | "len" | "range" | "int" | "str" | "bool" | "float" | "input" | "embed"
             | "socket" | "bind" | "listen" | "accept" | "recv" | "recv_string" | "send" | "connect" | "exit" | "close"
             | "recv_buf_ptr" | "recv_buf_len" | "alloc_copy" | "string_ptr" | "string_to_sockaddr"
-            | "setsockopt" | "signal" | "fork" | "wait" | "waitpid"
+            | "setsockopt" | "signal" | "fork" | "wait" | "waitpid" | "struct_ptr"
             | "syscall3" | "syscall6")
     }
 
@@ -792,6 +800,7 @@ impl Sema {
         };
         self.define_name(f.name.clone(), fn_ty, NameDef::Function);
         self.enter_scope();
+        self.all_locals.clear();
         
         for param in &f.params {
             let param_ty = if param.name == "self" {
@@ -812,18 +821,13 @@ impl Sema {
         
         // Collect local variable types from ALL scopes (including nested while/if)
         let mut local_vars: HashMap<String, Type> = HashMap::new();
-        for scope in self.scopes.iter() {
-            for (name, resolved) in scope.iter() {
-                if matches!(resolved.def, NameDef::Local | NameDef::Param) {
-                    let ty = resolved.ty.clone();
-                    let ty = if matches!(&ty, Type::Named(s) if s == "str") {
-                        Type::String
-                    } else {
-                        ty
-                    };
-                    local_vars.insert(name.clone(), ty);
-                }
-            }
+        for (name, (ty, _def)) in self.all_locals.iter() {
+            let ty = if matches!(ty, Type::Named(s) if s == "str") {
+                Type::String
+            } else {
+                ty.clone()
+            };
+            local_vars.insert(name.clone(), ty);
         }
         let fn_key = match &self.current_class {
             Some(cn) => format!("{}_{}", cn, f.name),
@@ -905,6 +909,9 @@ impl Sema {
 
     fn define_name(&mut self, name: String, ty: Type, def: NameDef) {
         let name_for_map = name.clone();
+        if matches!(def, NameDef::Local | NameDef::Param) {
+            self.all_locals.insert(name_for_map.clone(), (ty.clone(), def));
+        }
         let resolved = ResolvedName { name, ty, def };
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name_for_map, resolved);
@@ -916,7 +923,9 @@ impl Sema {
     fn check_let(&mut self, l: &Let) -> Result<(), Vec<SemaError>> {
         let val_ty = self.check_expr(&l.val)?;
         
-        let ty = l.ty.clone().ok_or_else(|| vec![SemaError::TypeAnnotationRequired { name: l.name.clone() }])?;
+        let raw_ty = l.ty.clone().ok_or_else(|| vec![SemaError::TypeAnnotationRequired { name: l.name.clone() }])?;
+        let ty = self.normalize_type(&raw_ty);
+        let val_ty = self.normalize_type(&val_ty);
         if !self.types_equal(&ty, &val_ty) {
             self.errors.push(SemaError::TypeMismatch {
                 expected: ty.clone(),
@@ -947,6 +956,9 @@ impl Sema {
         match ty {
             Type::Named(s) if s == "str" => Type::String,
             Type::Named(s) if s == "ptr" || s == "Pointer" => Type::I64,
+            Type::Named(s) if s == "int" || s == "i64" => Type::I64,
+            Type::Named(s) if s == "float" || s == "f64" => Type::F64,
+            Type::Named(s) if s == "bool" => Type::Bool,
             _ => ty.clone(),
         }
     }
@@ -1426,13 +1438,23 @@ impl Sema {
             Type::Named(n) => n.clone(),
             _ => return Type::Unit,
         };
-        if let Some(TypeDef::Class(c)) = self.types.get(&class_name) {
-            if let Some(field_ty) = c.fields.get(name) {
-                return field_ty.clone();
+        match self.types.get(&class_name) {
+            Some(TypeDef::Class(c)) => {
+                if let Some(field_ty) = c.fields.get(name) {
+                    return field_ty.clone();
+                }
+                if let Some(method) = c.methods.get(name) {
+                    return method.ret.clone().unwrap_or(Type::Unit);
+                }
             }
-            if let Some(method) = c.methods.get(name) {
-                return method.ret.clone().unwrap_or(Type::Unit);
+            Some(TypeDef::Struct(s)) => {
+                for (fname, fty) in &s.fields {
+                    if fname == name {
+                        return fty.clone();
+                    }
+                }
             }
+            _ => {}
         }
         Type::Unit
     }
@@ -1447,6 +1469,13 @@ impl Sema {
             }
             Type::Generic { base, args } if base == "list" || base == "List" || base == "Array" => {
                 args.first().cloned().unwrap_or(Type::Unit)
+            }
+            Type::Named(n) => {
+                if let Some(TypeDef::Struct(_)) = self.types.get(n) {
+                    ty.clone()
+                } else {
+                    Type::Unit
+                }
             }
             _ => Type::Unit,
         }
