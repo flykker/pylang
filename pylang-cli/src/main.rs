@@ -38,8 +38,31 @@ fn main() -> Result<()> {
     println!("Parsing: {}", &args.file);
 
     let mut sema = Sema::new();
-    let mut parser = PylangParser::new(&source);
     
+    // Step 1: Collect stdlib source and prepend to user source
+    let mut full_source = String::new();
+    if !args.no_stdlib {
+        let stdlib_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap()
+            .join("pylang-std")
+            .join("src");
+        if let Ok(stdlib_entries) = std::fs::read_dir(&stdlib_dir) {
+            for entry in stdlib_entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("py") {
+                    if let Ok(stdlib_src) = std::fs::read_to_string(&path) {
+                        println!("Loaded stdlib: {}", path.display());
+                        full_source.push_str(&stdlib_src);
+                        full_source.push('\n');
+                    }
+                }
+            }
+        }
+    }
+    full_source.push_str(&source);
+    
+    // Step 2: Parse everything together (stdlib + user code)
+    let mut parser = PylangParser::new(&full_source);
     match parser.parse(&mut sema) {
         Ok(mut ast) => {
             ast = desugar::desugar_decorators(ast);

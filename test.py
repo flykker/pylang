@@ -7,7 +7,7 @@ class HttpServer:
         self.routers = routers
 
     def run(self, host: str, port: int) -> int:
-        self.fd = socket(2, 1, 0)
+        self.fd = socket_sys(2, 1, 0)
 
         err: int = bind(self.fd, host, port)
         if err < 0:
@@ -18,21 +18,21 @@ class HttpServer:
         print(f"Running on port {port} ...\n")
 
         while 1:
-            conn: int = accept(self.fd)
-            pid: int = fork()
+            conn: int = accept_sys(self.fd)
+            
+            pid: int = fork_sys()
             if pid == 0:
-                data = recv(conn, 1024)
+                buf: ptr = alloc_sys(1032)
+                data_n: int = recv_sys(conn, buf, 1024)
 
-                if len(data) > 0:
+                if data_n > 0:
                     content: str = self.routers["/"]()
                     length: int = len(content)
                     response: str = f"HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n{content}"
                     send(conn, response)
                 close(conn)
                 exit(0)
-            close(conn)
-
-        close(self.fd)
+        close_sys(self.fd)
 
 
 class Router:

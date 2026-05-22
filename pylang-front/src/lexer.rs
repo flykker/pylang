@@ -441,6 +441,16 @@ impl<'src> Lexer<'src> {
             '_' => TokenKind::Underscore,
             '"' => return self.read_string(),
             '\'' => return self.read_char(),
+            '#' => {
+                // Skip comment to end of line
+                while let Some(c) = self.peek() {
+                    if c == '\n' {
+                        break;
+                    }
+                    self.advance();
+                }
+                return Some((TokenKind::Newline, 0));
+            }
             '\n' => {
                 return Some((TokenKind::Newline, 1));
             }

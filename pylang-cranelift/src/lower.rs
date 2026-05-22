@@ -1298,7 +1298,7 @@ fn lower_call(func: &Expr, args: &[Expr], lctx: &mut LowerCtx) -> Result<Value, 
                 call_runtime(lctx, "wait", &[], types::I64)
             }
             "waitpid" => {
-                if arg_vals.len() >= 1 {
+                if !arg_vals.is_empty() {
                     let args: &[Value] = &arg_vals;
                     call_runtime(lctx, "waitpid", args, types::I64)
                 } else {
@@ -1320,6 +1320,15 @@ fn lower_call(func: &Expr, args: &[Expr], lctx: &mut LowerCtx) -> Result<Value, 
                     Err("setsockopt(fd, level, optname, optval) requires 4 arguments".to_string())
                 }
             }
+            "signal" => {
+                if arg_vals.len() >= 2 {
+                    let signum = arg_vals[0];
+                    let handler = arg_vals[1];
+                    call_runtime(lctx, "signal", &[signum, handler], types::I64)
+                } else {
+                    Err("signal(signum, handler) requires 2 arguments".to_string())
+                }
+            }
             "embed" => {
                 if let Some(Expr::Str(path)) = args.first() {
                     let full_path = lctx.source_dir.join(path);
@@ -1328,6 +1337,22 @@ fn lower_call(func: &Expr, args: &[Expr], lctx: &mut LowerCtx) -> Result<Value, 
                     alloc_string_literal(lctx, &data)
                 } else {
                     Err("embed() requires a string literal argument".to_string())
+                }
+            }
+            "syscall3" => {
+                // syscall3(num, a1, a2, a3) — 4 аргумента всего
+                if arg_vals.len() >= 4 {
+                    call_runtime(lctx, "syscall3", &arg_vals[..4], types::I64)
+                } else {
+                    Err("syscall3(num, a1, a2, a3) requires 4 arguments".to_string())
+                }
+            }
+            "syscall6" => {
+                // syscall6(num, a1, a2, a3, a4, a5, a6) — 7 аргументов всего
+                if arg_vals.len() >= 7 {
+                    call_runtime(lctx, "syscall6", &arg_vals[..7], types::I64)
+                } else {
+                    Err("syscall6(num, a1, a2, a3, a4, a5, a6) requires 7 arguments".to_string())
                 }
             }
             _ => {

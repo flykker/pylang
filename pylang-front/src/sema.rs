@@ -111,6 +111,8 @@ impl Sema {
         self.types.insert("i16".to_string(), TypeDef::Primitive(PrimDef { name: "i16", size: 2 }));
         self.types.insert("i32".to_string(), TypeDef::Primitive(PrimDef { name: "i32", size: 4 }));
         self.types.insert("usize".to_string(), TypeDef::Primitive(PrimDef { name: "i64", size: 8 }));
+        self.types.insert("ptr".to_string(), TypeDef::Primitive(PrimDef { name: "i64", size: 8 }));
+        self.types.insert("Pointer".to_string(), TypeDef::Primitive(PrimDef { name: "i64", size: 8 }));
 
         let print_any = Type::Fn { params: vec![Type::Generic { base: "object".to_string(), args: vec![] }], ret: Box::new(Type::Unit) };
 
@@ -276,6 +278,23 @@ impl Sema {
         self.names.insert("setsockopt".to_string(), ResolvedName {
             name: "setsockopt".to_string(),
             ty: Type::Fn { params: vec![Type::I64, Type::I64, Type::I64, Type::I64], ret: Box::new(Type::I64) },
+            def: NameDef::Function,
+        });
+        self.names.insert("signal".to_string(), ResolvedName {
+            name: "signal".to_string(),
+            ty: Type::Fn { params: vec![Type::I64, Type::I64], ret: Box::new(Type::I64) },
+            def: NameDef::Function,
+        });
+
+        self.names.insert("syscall3".to_string(), ResolvedName {
+            name: "syscall3".to_string(),
+            ty: Type::Fn { params: vec![Type::I64, Type::I64, Type::I64, Type::I64], ret: Box::new(Type::I64) },
+            def: NameDef::Function,
+        });
+
+        self.names.insert("syscall6".to_string(), ResolvedName {
+            name: "syscall6".to_string(),
+            ty: Type::Fn { params: vec![Type::I64, Type::I64, Type::I64, Type::I64, Type::I64, Type::I64, Type::I64], ret: Box::new(Type::I64) },
             def: NameDef::Function,
         });
     }
@@ -727,7 +746,8 @@ impl Sema {
         matches!(name, "print" | "len" | "range" | "int" | "str" | "bool" | "float" | "input" | "embed"
             | "socket" | "bind" | "listen" | "accept" | "recv" | "recv_string" | "send" | "connect" | "exit" | "close"
             | "recv_buf_ptr" | "recv_buf_len" | "alloc_copy" | "string_ptr" | "string_to_sockaddr"
-            | "setsockopt")
+            | "setsockopt" | "signal" | "fork" | "wait" | "waitpid"
+            | "syscall3" | "syscall6")
     }
 
     pub fn get_captures(&self, fn_name: &str) -> Vec<String> {
@@ -926,6 +946,7 @@ impl Sema {
     fn normalize_type(&self, ty: &Type) -> Type {
         match ty {
             Type::Named(s) if s == "str" => Type::String,
+            Type::Named(s) if s == "ptr" || s == "Pointer" => Type::I64,
             _ => ty.clone(),
         }
     }
@@ -1382,6 +1403,7 @@ impl Sema {
             (Type::Generic { base: ba, args: aa }, Type::Generic { base: bb, args: ab }) =>
                 ba == bb && aa.len() == ab.len() && aa.iter().zip(ab.iter()).all(|(x,y)| self.types_equal(x, y)),
             // Empty dict {} → Named("dict") vs Generic { base: "dict", ... } 
+            (Type::Named(n), Type::I64) | (Type::I64, Type::Named(n)) if n == "ptr" || n == "Pointer" => true,
             (Type::Named(n), Type::Generic { base: b, .. }) | (Type::Generic { base: b, .. }, Type::Named(n)) if n == b => true,
             // Named("HttpServer") vs Class("HttpServer") — same class
             (Type::Named(n), Type::Class(c)) | (Type::Class(c), Type::Named(n)) if n == c => true,

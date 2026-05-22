@@ -42,7 +42,8 @@ pub extern "C" fn dealloc(_ptr: *mut u8, _size: usize) {
     // Bump allocator — no free.
 }
 
-unsafe fn syscall3(n: usize, a1: usize, a2: usize, a3: usize) -> usize {
+// Internal syscall wrappers (used by other builtins)
+unsafe fn raw_syscall3(n: usize, a1: usize, a2: usize, a3: usize) -> usize {
     let ret: usize;
     asm!(
         "syscall",
@@ -58,7 +59,7 @@ unsafe fn syscall3(n: usize, a1: usize, a2: usize, a3: usize) -> usize {
     ret
 }
 
-unsafe fn syscall6(n: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize) -> usize {
+unsafe fn raw_syscall6(n: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize) -> usize {
     let ret: usize;
     asm!(
         "syscall",
@@ -77,9 +78,20 @@ unsafe fn syscall6(n: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usi
     ret
 }
 
+// Public syscall wrappers — callable from generated code
+#[no_mangle]
+pub extern "C" fn syscall3(n: i64, a1: i64, a2: i64, a3: i64) -> i64 {
+    unsafe { raw_syscall3(n as usize, a1 as usize, a2 as usize, a3 as usize) as i64 }
+}
+
+#[no_mangle]
+pub extern "C" fn syscall6(n: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64) -> i64 {
+    unsafe { raw_syscall6(n as usize, a1 as usize, a2 as usize, a3 as usize, a4 as usize, a5 as usize, a6 as usize) as i64 }
+}
+
 #[no_mangle]
 pub extern "C" fn exit(code: i64) -> i64 {
-    unsafe { syscall3(60, code as usize, 0, 0); }
+    unsafe { raw_syscall3(60, code as usize, 0, 0); }
     unsafe { core::hint::unreachable_unchecked() }
 }
 
@@ -146,7 +158,7 @@ pub extern "C" fn print_int_raw(x: i64) {
             i += 1;
         }
     }
-    unsafe { syscall3(1, 1, ptr as usize, i); }
+    unsafe { raw_syscall3(1, 1, ptr as usize, i); }
 }
 
 #[no_mangle]
@@ -179,12 +191,12 @@ pub extern "C" fn print_int(x: i64) {
     }
     unsafe { ptr.add(i).write_volatile(b'\n'); }
     i += 1;
-    unsafe { syscall3(1, 1, ptr as usize, i); }
+    unsafe { raw_syscall3(1, 1, ptr as usize, i); }
 }
 
 #[no_mangle]
 pub extern "C" fn print_str(ptr: *const u8, len: usize) {
-    unsafe { syscall3(1, 1, ptr as usize, len); }
+    unsafe { raw_syscall3(1, 1, ptr as usize, len); }
 }
 
 #[no_mangle]
@@ -290,29 +302,29 @@ pub extern "C" fn call_fn(fn_ptr: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn socket(domain: i32, r#type: i32, protocol: i32) -> i32 {
-    unsafe { syscall3(41, domain as usize, r#type as usize, protocol as usize) as i32 }
+    unsafe { raw_syscall3(41, domain as usize, r#type as usize, protocol as usize) as i32 }
 }
 
 #[no_mangle]
 pub extern "C" fn setsockopt(fd: i32, level: i32, optname: i32, optval: *const u8, optlen: i32) -> i32 {
-    unsafe { syscall6(54, fd as usize, level as usize, optname as usize, optval as usize, optlen as usize, 0) as i32 }
+    unsafe { raw_syscall6(54, fd as usize, level as usize, optname as usize, optval as usize, optlen as usize, 0) as i32 }
 }
 
 #[no_mangle]
 pub extern "C" fn bind(fd: i32, sockaddr_ptr: *mut u8, addrlen: usize) -> i32 {
     let optval: i32 = 1;
-    unsafe { syscall6(54, fd as usize, 1, 2, &optval as *const _ as usize, 4, 0); }
-    unsafe { syscall3(49, fd as usize, sockaddr_ptr as usize, addrlen) as i32 }
+    unsafe { raw_syscall6(54, fd as usize, 1, 2, &optval as *const _ as usize, 4, 0); }
+    unsafe { raw_syscall3(49, fd as usize, sockaddr_ptr as usize, addrlen) as i32 }
 }
 
 #[no_mangle]
 pub extern "C" fn connect(fd: i32, sockaddr_ptr: *mut u8, addrlen: usize) -> i32 {
-    unsafe { syscall3(42, fd as usize, sockaddr_ptr as usize, addrlen) as i32 }
+    unsafe { raw_syscall3(42, fd as usize, sockaddr_ptr as usize, addrlen) as i32 }
 }
 
 #[no_mangle]
 pub extern "C" fn listen(fd: i32, backlog: i32) -> i32 {
-    unsafe { syscall3(50, fd as usize, backlog as usize, 0) as i32 }
+    unsafe { raw_syscall3(50, fd as usize, backlog as usize, 0) as i32 }
 }
 
 #[no_mangle]
@@ -320,7 +332,7 @@ pub extern "C" fn accept(fd: i32) -> i32 {
     let mut addr: [usize; 3] = [2, 0, 0];
     let mut addr_len: usize = 16;
     unsafe {
-        let ret = syscall3(43, fd as usize, &mut addr as *mut _ as usize, &mut addr_len as *mut _ as usize);
+        let ret = raw_syscall3(43, fd as usize, &mut addr as *mut _ as usize, &mut addr_len as *mut _ as usize);
         ret as i32
     }
 }
@@ -328,7 +340,7 @@ pub extern "C" fn accept(fd: i32) -> i32 {
 #[no_mangle]
 pub extern "C" fn recv(fd: i32, buf: *mut u8, size: usize) -> isize {
     let data_ptr = unsafe { buf.add(8) };
-    let ret = unsafe { syscall6(45, fd as usize, data_ptr as usize, size, 0, 0, 0) as isize };
+    let ret = unsafe { raw_syscall6(45, fd as usize, data_ptr as usize, size, 0, 0, 0) as isize };
     if ret > 0 {
         unsafe { *(buf as *mut i64) = ret as i64 };
     } else if ret == 0 {
@@ -341,32 +353,46 @@ pub extern "C" fn recv(fd: i32, buf: *mut u8, size: usize) -> isize {
 pub extern "C" fn send(fd: i32, data: *const u8) -> isize {
     let len = unsafe { *(data as *const i64) } as usize;
     let data_ptr = unsafe { data.add(8) };
-    unsafe { syscall6(44, fd as usize, data_ptr as usize, len, 0, 0, 0) as isize }
+    unsafe { raw_syscall6(44, fd as usize, data_ptr as usize, len, 0, 0, 0) as isize }
 }
 
 #[no_mangle]
 pub extern "C" fn fork() -> i32 {
-    unsafe { syscall3(57, 0, 0, 0) as i32 }
+    unsafe { raw_syscall3(57, 0, 0, 0) as i32 }
 }
 
 #[no_mangle]
 pub extern "C" fn wait() -> i32 {
-    unsafe { syscall3(61, 0, 0, 0) as i32 }
+    unsafe { raw_syscall3(61, 0, 0, 0) as i32 }
 }
 
 #[no_mangle]
 pub extern "C" fn waitpid(pid: i32, status: *mut i32, options: usize) -> i32 {
-    unsafe { syscall6(260, pid as usize, status as usize, options, 0, 0, 0) as i32 }
+    unsafe { raw_syscall6(61, pid as usize, status as usize, options, 0, 0, 0) as i32 }
 }
 
 #[no_mangle]
 pub extern "C" fn close(fd: i32) -> i32 {
-    unsafe { syscall3(3, fd as usize, 0, 0) as i32 }
+    unsafe { raw_syscall3(3, fd as usize, 0, 0) as i32 }
+}
+
+/// signal(signum, handler) — установка обработчика сигнала с помощью syscall rt_sigaction
+#[no_mangle]
+pub extern "C" fn signal(signum: i64, handler: i64) -> i64 {
+    let mut act: [u8; 40] = [0u8; 40];
+    let handler_ptr = handler as usize;
+    act[..8].copy_from_slice(&handler_ptr.to_ne_bytes());
+    let act_ptr = &act as *const _ as usize;
+    let oldact_ptr: usize = 0;
+    let sigsetsize: usize = 16;
+    unsafe {
+        raw_syscall6(13, signum as usize, act_ptr, oldact_ptr, sigsetsize, 0, 0) as i64
+    }
 }
 
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    unsafe { syscall3(60, 1, 0, 0); }
+    unsafe { raw_syscall3(60, 1, 0, 0); }
     loop {}
 }
