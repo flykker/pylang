@@ -103,6 +103,10 @@ impl<'src> Parser<'src> {
             .unwrap_or(false)
     }
 
+    fn current_col(&self) -> Option<usize> {
+        self.current.as_ref().map(|t| t.span.start.col)
+    }
+
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
         let token = self.current.clone().ok_or(ParseError::InvalidSyntax { span: Span::default() })?;
         
@@ -946,6 +950,7 @@ impl<'src> Parser<'src> {
         Ok(Stmt::Struct(Struct { name, fields }))
     }
     fn parse_if(&mut self) -> Result<Stmt, ParseError> {
+        let if_col = self.current.as_ref().map(|t| t.span.start.col).unwrap_or(0);
         self.bump();
         
         let cond = self.parse_expr()?;
@@ -955,7 +960,7 @@ impl<'src> Parser<'src> {
         let then = self.parse_suite()?;
         
         let mut elif = Vec::new();
-        while self.at(&TokenKind::Elif) {
+        while self.current_col() == Some(if_col) && self.at(&TokenKind::Elif) {
             self.bump();
             
             let elif_cond = self.parse_expr()?;
@@ -970,7 +975,7 @@ impl<'src> Parser<'src> {
             });
         }
         
-        let else_ = if self.at(&TokenKind::Else) {
+        let else_ = if self.current_col() == Some(if_col) && self.at(&TokenKind::Else) {
             self.bump();
             self.expect(TokenKind::Colon)?;
             self.skip_newline()?;
