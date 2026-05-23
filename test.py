@@ -20,7 +20,7 @@ class HttpServer:
                 ev: epoll_event = events[i]
                 conn: int = ev.data
                 if conn == listen_fd:
-                    conn = accept4(listen_fd, 0)
+                    conn = accept4(listen_fd, 2048)  # SOCK_NONBLOCK
                     if conn > 0:
                         conn_ev: epoll_event = epoll_event(0x1, conn)
                         epoll_ctl(efd, 1, conn, struct_ptr(conn_ev))
@@ -36,7 +36,7 @@ class HttpServer:
                 i = i + 1
 
     def run(self, host: str, port: int) -> int:
-        self.fd = socket(2, 1, 0)
+        self.fd = socket(2, 1 | 2048, 0)  # SOCK_STREAM | SOCK_NONBLOCK
 
         err: int = bind(self.fd, host, port)
         if err < 0:

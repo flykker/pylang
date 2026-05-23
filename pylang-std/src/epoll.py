@@ -1,4 +1,5 @@
 # Epoll stdlib for Pylang — built on top of syscall3/syscall6
+# SOCK_NONBLOCK = 0x800 = 2048
 
 struct epoll_event:
     events: i32

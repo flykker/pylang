@@ -256,8 +256,10 @@ impl<'src> Parser<'src> {
                     }
                     self.expect(TokenKind::RBracket)?;
                     Type::Generic { base: name.clone(), args }
-                } else if name == "int" {
+                } else if name == "int" || name == "i64" {
                     Type::I64
+                } else if name == "i32" {
+                    Type::I32
                 } else if name == "float" {
                     Type::F64
                 } else if name == "bool" {

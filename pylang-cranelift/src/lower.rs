@@ -13,6 +13,7 @@ struct StructField {
     _name: String,
     offset: i64,
     _ty: Type,
+    _size: i64,
 }
 
 #[derive(Clone)]
@@ -119,13 +120,15 @@ pub fn lower_module(
                 let mut offset = 0i64;
                 let mut fields: Vec<StructField> = Vec::new();
                 for (name, ty) in &s.fields {
-                    let ty = ast_type_to_clif(ty)?;
+                    let ty = struct_field_clif_type(ty)?;
+                    let size = clif_type_size(ty);
                     fields.push(StructField {
                         _name: name.clone(),
                         offset,
                         _ty: ty,
+                        _size: size,
                     });
-                    offset += 8;
+                    offset += size;
                 }
                 struct_defs.insert(s.name.clone(), StructInfo {
                     _name: s.name.clone(),
@@ -157,6 +160,7 @@ pub fn lower_module(
                                                         _name: name.clone(),
                                                         offset,
                                                         _ty: types::I64,
+                                                        _size: 8,
                                                     });
                                                     field_defaults.push(0);
                                                     offset += 8;
@@ -172,6 +176,7 @@ pub fn lower_module(
                                 _name: l.name.clone(),
                                 offset,
                                 _ty: types::I64,
+                                _size: 8,
                             });
                             let default_val = extract_int_from_expr(&l.val);
                             field_defaults.push(default_val);
@@ -185,6 +190,7 @@ pub fn lower_module(
                                             _name: name.clone(),
                                             offset,
                                             _ty: types::I64,
+                                            _size: 8,
                                         });
                                         let default_val = extract_int_from_expr(&a.val);
                                         field_defaults.push(default_val);
@@ -196,6 +202,7 @@ pub fn lower_module(
                                     _name: n.clone(),
                                     offset,
                                     _ty: types::I64,
+                                    _size: 8,
                                 });
                                 let default_val = extract_int_from_expr(&a.val);
                                 field_defaults.push(default_val);
@@ -438,6 +445,7 @@ fn lower_fn_inner(
     fn_var_types: &HashMap<String, HashMap<String, AstType>>,
     source_dir: &Path,
 ) -> Result<FuncId, String> {
+    let _ = std::fs::write(format!("/tmp/lower_start_{}", f.name), format!("start: {}", f.name));
 
     // Pre-pass: find nested functions and hoist them to module level
     for stmt in &f.body {
@@ -708,8 +716,16 @@ fn lower_fn_closure(
     lctx.builder.seal_all_blocks();
     lctx.builder.finalize();
 
+    let _ = std::fs::write(format!("/tmp/lower_{}_clif", f.name), format!("{}", ctx.func.display()));
+
+    let _ = std::fs::write(format!("/tmp/lower_before_def_{}", f.name), format!("before define: {}", f.name));
+
     module.define_function(func_id, &mut ctx)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            e.to_string()
+        })?;
+
+    let _ = std::fs::write(format!("/tmp/lower_ok_{}", f.name), format!("ok: {}", f.name));
 
     Ok(func_id)
 }
@@ -728,12 +744,14 @@ fn clif_type(ty: &AstType) -> Result<Type, String> {
         AstType::F64 => Ok(types::F64),
         AstType::Bool => Ok(types::I8),
         AstType::Char => Ok(types::I64),
+        AstType::I32 => Ok(types::I32),
         AstType::Unit => Ok(types::I64),
         AstType::String => Ok(types::I64),  // String pointer
         AstType::Named(n) if n == "int" => Ok(types::I64),
         AstType::Named(n) if n == "float" => Ok(types::F64),
         AstType::Named(n) if n == "bool" => Ok(types::I8),
         AstType::Named(n) if n == "str" => Ok(types::I64),
+        AstType::Named(n) if n == "i32" => Ok(types::I32),
         AstType::Named(_) => Ok(types::I64),
         AstType::Generic { .. } => Ok(types::I64),
         _ => Err(format!("unsupported type: {:?}", ty)),
@@ -742,6 +760,28 @@ fn clif_type(ty: &AstType) -> Result<Type, String> {
 
 fn ast_type_to_clif(ty: &AstType) -> Result<Type, String> {
     clif_type(ty)
+}
+
+fn clif_type_size(ty: Type) -> i64 {
+    if ty == types::I32 || ty == types::I8 {
+        4
+    } else {
+        8
+    }
+}
+
+fn struct_field_clif_type(ty: &AstType) -> Result<Type, String> {
+    match ty {
+        AstType::I32 => Ok(types::I32),
+        AstType::Bool => Ok(types::I32),  // 4-byte field
+        AstType::Char => Ok(types::I32),
+        AstType::Named(n) if n == "i32" => Ok(types::I32),
+        _ => ast_type_to_clif(ty),
+    }
+}
+
+fn struct_total_size(fields: &[StructField]) -> i64 {
+    fields.last().map_or(0, |f| f.offset + f._size)
 }
 
 fn lower_stmt(stmt: &Stmt, lctx: &mut LowerCtx) -> Result<(), String> {
@@ -809,7 +849,13 @@ fn lower_stmt(stmt: &Stmt, lctx: &mut LowerCtx) -> Result<(), String> {
                 let offset = resolve_dot_field_offset(obj, name, lctx);
                 let offset_val = lctx.builder.ins().iconst(types::I64, offset);
                 let addr = lctx.builder.ins().iadd(obj_val, offset_val);
-                lctx.builder.ins().store(MemFlags::trusted(), val, addr, 0);
+                let field_ty = get_field_type(lctx, name);
+                let stored_val = if field_ty == types::I32 {
+                    lctx.builder.ins().ireduce(types::I32, val)
+                } else {
+                    val
+                };
+                lctx.builder.ins().store(MemFlags::trusted(), stored_val, addr, 0);
                 Ok(())
             } else if let Expr::Index { obj, idx } = &*a.target {
                 let obj = lower_expr(obj, lctx)?;
@@ -954,7 +1000,13 @@ fn lower_expr(expr: &Expr, lctx: &mut LowerCtx) -> Result<Value, String> {
             let offset = resolve_dot_field_offset(obj, name, lctx);
             let offset_val = lctx.builder.ins().iconst(types::I64, offset);
             let addr = lctx.builder.ins().iadd(obj_val, offset_val);
-            Ok(lctx.builder.ins().load(types::I64, MemFlags::trusted(), addr, 0))
+            let field_ty = get_field_type(lctx, name);
+            let loaded = lctx.builder.ins().load(field_ty, MemFlags::trusted(), addr, 0);
+            Ok(if field_ty == types::I32 {
+                lctx.builder.ins().uextend(types::I64, loaded)
+            } else {
+                loaded
+            })
         }
         Expr::Index { obj, idx } => {
             let obj_val = lower_expr(obj, lctx)?;
@@ -971,7 +1023,7 @@ fn lower_expr(expr: &Expr, lctx: &mut LowerCtx) -> Result<Value, String> {
                     });
                 if let Some(ref sn) = struct_name {
                     if let Some(struct_info) = lctx.struct_defs.get(sn) {
-                        let elem_size = (struct_info.fields.len() * 8) as i64;
+                        let elem_size = struct_total_size(&struct_info.fields);
                         let elem_size_val = lctx.builder.ins().iconst(types::I64, elem_size);
                         let offset = lctx.builder.ins().imul(idx_val, elem_size_val);
                         let addr = lctx.builder.ins().iadd(obj_val, offset);
@@ -1444,22 +1496,28 @@ fn lower_call(func: &Expr, args: &[Expr], lctx: &mut LowerCtx) -> Result<Value, 
                         Ok(results[0])
                     }
                 } else if let Some(struct_info) = lctx.struct_defs.get(name).cloned() {
-                    if arg_vals.len() == 1 {
+                    let total_struct_size = struct_total_size(&struct_info.fields);
+                    if arg_vals.len() == 1 && struct_info.fields.len() != 1 {
                         // Array allocation: struct_name(count)
                         let count = arg_vals[0];
-                        let elem_size = (struct_info.fields.len() * 8) as i64;
+                        let elem_size = total_struct_size;
                         let elem_size_val = lctx.builder.ins().iconst(types::I64, elem_size);
                         let total_size = lctx.builder.ins().imul(count, elem_size_val);
                         let ptr = call_runtime(lctx, "alloc", &[total_size], types::I64)?;
                         Ok(ptr)
                     } else {
-                        let size = lctx.builder.ins().iconst(types::I64, (struct_info.fields.len() * 8) as i64);
-                        let ptr = call_runtime(lctx, "alloc", &[size], types::I64)?;
+                        let size_val = lctx.builder.ins().iconst(types::I64, total_struct_size);
+                        let ptr = call_runtime(lctx, "alloc", &[size_val], types::I64)?;
                         for (i, field) in struct_info.fields.iter().enumerate() {
                             if i < arg_vals.len() {
                                 let offset_val = lctx.builder.ins().iconst(types::I64, field.offset);
                                 let addr = lctx.builder.ins().iadd(ptr, offset_val);
-                                lctx.builder.ins().store(MemFlags::trusted(), arg_vals[i], addr, 0);
+                                let stored_val = if field._ty == types::I32 {
+                                    lctx.builder.ins().ireduce(types::I32, arg_vals[i])
+                                } else {
+                                    arg_vals[i]
+                                };
+                                lctx.builder.ins().store(MemFlags::trusted(), stored_val, addr, 0);
                             }
                         }
                         Ok(ptr)
@@ -2015,6 +2073,24 @@ fn get_field_offset(lctx: &LowerCtx, field_name: &str) -> i64 {
     }
 }
 
+fn get_field_type(lctx: &LowerCtx, field_name: &str) -> Type {
+    for struct_info in lctx.struct_defs.values() {
+        for field in &struct_info.fields {
+            if field._name == field_name {
+                return field._ty;
+            }
+        }
+    }
+    for class_info in lctx.class_defs.values() {
+        for field in &class_info._fields {
+            if field._name == field_name {
+                return field._ty;
+            }
+        }
+    }
+    types::I64
+}
+
 // ---- Control Flow ----
 
 fn lower_if(i: &If, lctx: &mut LowerCtx) -> Result<(), String> {
@@ -2027,6 +2103,7 @@ fn lower_if(i: &If, lctx: &mut LowerCtx) -> Result<(), String> {
     lctx.block_filled = true;
 
     lctx.switch_to_block(then_block);
+    lctx.block_filled = false;
     for stmt in &i.then {
         if lctx.block_filled { break; }
         lower_stmt(stmt, lctx)?;
@@ -2037,6 +2114,7 @@ fn lower_if(i: &If, lctx: &mut LowerCtx) -> Result<(), String> {
     lctx.builder.seal_block(then_block);
 
     lctx.switch_to_block(else_block);
+    lctx.block_filled = false;
     if let Some(ref else_stmts) = i.else_ {
         for stmt in else_stmts {
             if lctx.block_filled { break; }
@@ -2428,8 +2506,8 @@ mod tests {
         struct_defs.insert("Point".to_string(), StructInfo {
             _name: "Point".to_string(),
             fields: vec![
-                StructField { _name: "x".to_string(), offset: 0, _ty: types::I64 },
-                StructField { _name: "y".to_string(), offset: 8, _ty: types::I64 },
+                StructField { _name: "x".to_string(), offset: 0, _ty: types::I64, _size: 8 },
+                StructField { _name: "y".to_string(), offset: 8, _ty: types::I64, _size: 8 },
             ],
         });
         let mut func_ids = HashMap::new();

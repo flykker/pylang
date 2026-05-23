@@ -957,6 +957,7 @@ impl Sema {
             Type::Named(s) if s == "str" => Type::String,
             Type::Named(s) if s == "ptr" || s == "Pointer" => Type::I64,
             Type::Named(s) if s == "int" || s == "i64" => Type::I64,
+            Type::Named(s) if s == "i32" => Type::I32,
             Type::Named(s) if s == "float" || s == "f64" => Type::F64,
             Type::Named(s) if s == "bool" => Type::Bool,
             _ => ty.clone(),
@@ -1399,6 +1400,7 @@ impl Sema {
     fn types_equal(&self, a: &Type, b: &Type) -> bool {
         match (a, b) {
             (Type::I64, Type::I64) => true,
+            (Type::I32, Type::I32) => true,
             (Type::F64, Type::F64) => true,
             (Type::Bool, Type::Bool) => true,
             (Type::Char, Type::Char) => true,
